@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="https://cdn.cloudflare.steamstatic.com/steam/apps/200260/capsule_616x353.jpg" width="616"
+       alt="Batman: Arkham City - Game of the Year Edition">
+</p>
+
 # Batman City VR
 
 Batman: Arkham City in PC VR, with per-eye DLSS, an AFW speed mode, and OpenXR for Virtual Desktop and SteamVR. The
@@ -78,6 +83,8 @@ removes the mod and the shortcuts and puts your game settings back as they were.
 Built on [bioshock-vr](https://github.com/mohamad-balouza/bioshock-vr) (MIT), MinHook, Dear ImGui and the OpenXR SDK.
 The per-eye DLSS method follows the [Luma Framework](https://github.com/Filoppi/Luma-Framework)'s Arkham Knight mod.
 DLSS is NVIDIA's. Full list: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The picture at the top is the game's own Steam store artwork, shown from Steam (Batman: Arkham City © Warner Bros.
+Entertainment, Batman and all characters © DC); it is not part of this repository.
 
 Batman: Arkham City © Warner Bros. Entertainment Inc. Batman and related characters are trademarks of DC Comics. This
 is an unofficial fan mod and needs your own copy of the game.
