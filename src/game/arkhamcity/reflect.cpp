@@ -1,4 +1,5 @@
 #include "game/arkhamcity/reflect.h"
+#include "core/ui/overlay.h"
 
 #include "core/gfx/blit.h"
 #include "core/gfx/frame_inspector.h"
@@ -217,7 +218,7 @@ void request_pictures(const wchar_t* dir) {
 
 void draw_ui() {
     bool on = g_on.load();
-    if (ImGui::Checkbox("puddle reflections rendered for each eye", &on)) g_on.store(on);
+    if (bvr::overlay::show_tests() && ImGui::Checkbox("puddle reflections rendered for each eye", &on)) g_on.store(on);
 }
 
 void status_line(char* out, unsigned n) {

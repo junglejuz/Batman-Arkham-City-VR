@@ -570,7 +570,7 @@ void draw_ui() {
     ch |= bvr::overlay::SliderStep("clear centre  (deg)", &c, 5.0f, 60.0f, "%.0f");
     ch |= bvr::overlay::SliderStep("fade width  (deg)", &r, 2.0f, 60.0f, "%.0f");
     if (ch) bvr::vr::set_vignette_look(s, c, r);
-    ImGui::TextDisabled("   game view %.0f deg - zoom %s, detective %s", g_gameHfov.load(), zoom_active() ? "ON" : "off",
+    if (bvr::overlay::show_tests()) ImGui::TextDisabled("   game view %.0f deg - zoom %s, detective %s", g_gameHfov.load(), zoom_active() ? "ON" : "off",
                         detective_active() ? "ON" : "off");
 }
 

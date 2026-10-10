@@ -543,13 +543,13 @@ void draw_ui() {
     if (ImGui::Checkbox("pause menu grime (off = removed)", &dr)) g_dirtRoom.store(dr);
     if (g_dirtRoom.load()) {
         float sp = g_dirtSpanDeg.load();
-        if (bvr::overlay::SliderStep("pause dirt spread (deg)", &sp, 60.0f, 300.0f, "%.0f")) g_dirtSpanDeg.store(sp);
+        if (bvr::overlay::show_tests() && bvr::overlay::SliderStep("pause dirt spread (deg)", &sp, 60.0f, 300.0f, "%.0f")) g_dirtSpanDeg.store(sp);
     }
     if (g_mode.load() == kRoom || g_dirtRoom.load()) {
         float d = g_distM.load(), w = g_widthM.load(), u = g_upM.load();
-        if (bvr::overlay::SliderStep("dirt screen distance (m)", &d, 1.0f, 12.0f, "%.1f")) g_distM.store(d);
-        if (bvr::overlay::SliderStep("dirt screen width (m)", &w, 1.0f, 30.0f, "%.1f")) g_widthM.store(w);
-        if (bvr::overlay::SliderStep("dirt screen height (m)", &u, -3.0f, 3.0f, "%.2f")) g_upM.store(u);
+        if (bvr::overlay::show_tests() && bvr::overlay::SliderStep("dirt screen distance (m)", &d, 1.0f, 12.0f, "%.1f")) g_distM.store(d);
+        if (bvr::overlay::show_tests() && bvr::overlay::SliderStep("dirt screen width (m)", &w, 1.0f, 30.0f, "%.1f")) g_widthM.store(w);
+        if (bvr::overlay::show_tests() && bvr::overlay::SliderStep("dirt screen height (m)", &u, -3.0f, 3.0f, "%.2f")) g_upM.store(u);
     }
 }
 

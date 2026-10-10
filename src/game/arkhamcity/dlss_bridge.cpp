@@ -1,4 +1,5 @@
 #include "game/arkhamcity/dlss_bridge.h"
+#include "core/ui/overlay.h"
 
 #include "core/gfx/frame_inspector.h"
 #include "core/gfx/gfx_hud.h"
@@ -957,7 +958,7 @@ void draw_ui() {
         ImGui::SameLine(); if (ImGui::RadioButton("mild##mb", mb == 2)) g_mipBias.store(2);
         ImGui::SameLine(); if (ImGui::RadioButton("off##mb", mb == 0)) g_mipBias.store(0);
     }
-    if (live > 0) {
+    if (live > 0 && bvr::overlay::show_tests()) {
         // JJ 2026-10-08: "the in-game glows are very flickery ... distant city lights". Live A/B for the two suspects.
         bool jit = g_jitterOn.load();
         if (ImGui::Checkbox("sub-pixel shake (DLSS needs it for smooth edges; test: off = do glows stop flickering?)", &jit)) {
@@ -966,7 +967,7 @@ void draw_ui() {
             BVR_LOG("[dlss] jitter %d (panel)", jit ? 1 : 0);
         }
     }
-    if (live > 0) {
+    if (live > 0 && bvr::overlay::show_tests()) {
         // FINISHFIRST (2026-10-09): the headset froze twice with DLSS (graphics card fault). Live A/B of the hand-off.
         int sy = g_sync.load();
         ImGui::TextUnformatted("hand-off to DLSS:");

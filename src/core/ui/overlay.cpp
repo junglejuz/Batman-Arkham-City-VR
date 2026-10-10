@@ -95,6 +95,7 @@ int g_sliderOwnFrame = -100;
 // scrolls the page back to wherever the highlight is - two controls fighting over the page. On: stick up / down moves
 // the highlight like the D-pad (the page follows it), the stick's free scroll is off.
 std::atomic<bool> g_stickNav{true};
+std::atomic<bool> g_showTests{false}; // PANELTIDY
 float g_panelScroll = 0, g_panelScrollMax = 0; // PANELLOG: the page's scroll position last frame
 
 int tweak_dir() {
@@ -398,6 +399,8 @@ void on_resize() {
 }
 
 void set_chord_double_tap(ChordTapFn fn) { g_chordDoubleTap.store(fn); }
+bool show_tests() { return g_showTests.load(std::memory_order_relaxed); }
+void set_show_tests(bool on) { g_showTests.store(on); }
 void set_stick_nav(bool on) {
     g_stickNav.store(on);
     BVR_LOG("overlay: stick up/down moves %s", on ? "the highlight (the page follows it)" : "the page (ImGui's own scroll)");

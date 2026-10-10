@@ -21,6 +21,11 @@ void set_chord_double_tap(ChordTapFn fn);
 // STICKNAV (JJ 2026-10-10, panel scroll looping back down): stick up/down moves the highlight like the D-pad (default
 // on); off = ImGui's own free scroll with the stick.
 void set_stick_nav(bool on);
+// PANELTIDY (JJ 2026-10-10, before release 0.1.1): settled tests, test buttons and diagnostics are hidden unless the
+// panel's last checkbox "show test options" is ticked (not saved: every start hides them). Captures then also arm the
+// heavy frame / view dumps.
+bool show_tests();
+void set_show_tests(bool on);
 
 // ONESTEP (AKVR 2026-09-27, ported 2026-10-09 - JJ: "the slider should move 0.01 for every click on the D-pad;
 // currently it moves several units at a time"): ImGui's own gamepad tweak moves a slider 1% of its RANGE per press.

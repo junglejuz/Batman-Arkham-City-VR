@@ -393,10 +393,12 @@ void save_capture() {
         }
         fclose(f);
     }
-    g_dumpRequested.store(g_stereo.load() ? 2 : 1); // both eyes' FSceneView (own timestamped folder)
-    g_dumpOriginEye = 0;
-    bvr::frame_inspector::arm(3, 3);                  // 3 passes (both eyes of one frame), every PS texture slot (data folder)
-    BVR_LOG("[bc] CAPTURE saved -> %ls (status, last 20 s telemetry; view + frame dumps follow)", dir);
+    if (bvr::overlay::show_tests()) { // PANELTIDY: the heavy dumps (3 MB each) only with test options on
+        g_dumpRequested.store(g_stereo.load() ? 2 : 1); // both eyes' FSceneView (own timestamped folder)
+        g_dumpOriginEye = 0;
+        bvr::frame_inspector::arm(3, 3);                  // 3 passes (both eyes of one frame), every PS texture slot (data folder)
+    }
+    BVR_LOG("[bc] CAPTURE saved -> %ls (status, last 20 s telemetry%s)", dir, bvr::overlay::show_tests() ? "; view + frame dumps follow" : "");
 }
 
 // DRAW CENSUS (2026-10-07, JJ: the pause menu's dirt overlay sits on the face): every distinct
@@ -1880,7 +1882,7 @@ void draw_ui() {
     // Head tracking, controller hint, closed drawers; tests under Advanced, numbers under
     // Diagnostics, keys under Keyboard shortcuts.
     const ImVec4 kGreen(0.3f, 1.0f, 0.55f, 1.0f), kAmber(1.0f, 0.7f, 0.25f, 1.0f);
-    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "Arkham City VR");
+    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "Batman City VR");
     ImGui::SameLine();
     ImGui::TextDisabled("   build: " __DATE__ " " __TIME__);
     {
@@ -1903,7 +1905,7 @@ void draw_ui() {
     if (g_mapTestStart.load()) {
         ImGui::TextColored(kAmber, "Map test running - keep the map open (about %llu s left)",
                            (g_mapTestStart.load() + 15000 + 7 * 6000 - (std::min)(GetTickCount64(), g_mapTestStart.load() + 57000)) / 1000);
-    } else if (ImGui::Button("Map test: press, close this panel, open the map, wait 1 minute")) {
+    } else if (bvr::overlay::show_tests() && ImGui::Button("Map test: press, close this panel, open the map, wait 1 minute")) {
         start_map_test();
     }
     ImGui::TextDisabled("controller: left stick / d-pad = move, A = select / change, B = back, both stick clicks = close");
@@ -1925,19 +1927,19 @@ void draw_ui() {
         float ipd = g_ipdMm.load();
         if (bvr::overlay::SliderStep("eye distance (mm)", &ipd, 50.0f, 80.0f, "%.1f")) { g_ipdMm.store(ipd); set_ipd_tag(); }
         bool s2 = g_state2On.load();
-        if (ImGui::Checkbox("right eye keeps its own view history (anti-flicker)", &s2)) g_state2On.store(s2);
+        if (bvr::overlay::show_tests() && ImGui::Checkbox("right eye keeps its own view history (anti-flicker)", &s2)) g_state2On.store(s2);
         reflect::draw_ui();
         glow::draw_ui();
         bool bb = billboard::enabled();
-        if (ImGui::Checkbox("particles (rain, droplets) turn with the game camera, not your head", &bb))
+        if (bvr::overlay::show_tests() && ImGui::Checkbox("particles (rain, droplets) turn with the game camera, not your head", &bb))
             billboard::set_enabled(bb);
         bool s1 = g_state1On.load();
-        if (ImGui::Checkbox("left eye keeps its own view history (same lights and signs in both eyes)", &s1))
+        if (bvr::overlay::show_tests() && ImGui::Checkbox("left eye keeps its own view history (same lights and signs in both eyes)", &s1))
             g_state1On.store(s1);
         bool pos = g_posOn.load();
         if (ImGui::Checkbox("head position (lean / move)", &pos)) g_posOn.store(pos);
         bool asym = bvr::vr::asym_fov();
-        if (ImGui::Checkbox("each eye shaped for its lens (sharper, less wasted)", &asym)) bvr::vr::set_asym_fov(asym);
+        if (bvr::overlay::show_tests() && ImGui::Checkbox("each eye shaped for its lens (sharper, less wasted)", &asym)) bvr::vr::set_asym_fov(asym);
         bool kf = window::keep_focus();
         if (ImGui::Checkbox("keep playing when the game window is not in front", &kf)) window::set_keep_focus(kf);
     }
@@ -2027,9 +2029,9 @@ void draw_ui() {
         ImGui::TextDisabled("   takes effect the next time the game starts");
         room_overlay::draw_ui();
         bool rs = bvr::vr::screen_room();
-        if (ImGui::Checkbox("logos / loading: screen drawn into the 3D view (steadier in Virtual Desktop)", &rs))
+        if (bvr::overlay::show_tests() && ImGui::Checkbox("logos / loading: screen drawn into the 3D view (steadier in Virtual Desktop)", &rs))
             bvr::vr::set_screen_room(rs);
-        ImGui::TextDisabled("   off = the older floating panel");
+        if (bvr::overlay::show_tests()) ImGui::TextDisabled("   off = the older floating panel");
         float d = 0, w = 0;
         bvr::vr::get_screen_quad(&d, &w);
         bool ch = bvr::overlay::SliderStep("movie / loading screen distance (m)", &d, 0.8f, 6.0f, "%.2f");
@@ -2084,6 +2086,7 @@ void draw_ui() {
                 }
             }
         }
+        if (bvr::overlay::show_tests()) { // PANELTIDY: settled (exact pose tags on)
         ImGui::Separator();
         bool exact = bvr::vr::exact_pose_tag();
         if (ImGui::Checkbox("exact head-pose match (recommended)", &exact)) bvr::vr::set_exact_pose_tag(exact);
@@ -2095,9 +2098,10 @@ void draw_ui() {
         uint32_t hit = 0, miss = 0;
         bvr::vr::exact_pose_tag_stats(&hit, &miss);
         ImGui::TextDisabled("   exact matches %u, missed %u", hit, miss);
+        }
     }
     ImGui::SetNextItemOpen(false, ImGuiCond_Once);
-    if (ImGui::CollapsingHeader("Advanced  (tests - leave alone)")) {
+    if (bvr::overlay::show_tests() && ImGui::CollapsingHeader("Advanced  (tests - leave alone)")) {
         bool cam = g_camera.load();
         if (ImGui::Checkbox("VR camera", &cam)) set_camera(cam);
         bool st = g_stereo.load();
@@ -2110,7 +2114,7 @@ void draw_ui() {
         if (ImGui::Button("Save the view (both eyes)")) { g_dumpRequested.store(g_stereo.load() ? 2 : 1); g_dumpOriginEye = 0; }
     }
     ImGui::SetNextItemOpen(false, ImGuiCond_Once);
-    if (ImGui::CollapsingHeader("Diagnostics")) {
+    if (bvr::overlay::show_tests() && ImGui::CollapsingHeader("Diagnostics")) {
         ImGui::Text("engine hooks %s | draws %u, second %u, view edits %u | hfov %.1f", g_live.load() ? "LIVE" : "off",
                     g_draws.load(), g_secondDraws.load(), g_viewEdits.load(), g_lastHfov);
         ImGui::Text("eye labels: game %u, render %u (in flight %d), labelled %u", g_gameBegins.load(), g_rtBegins.load(),
@@ -2125,7 +2129,11 @@ void draw_ui() {
     }
     ImGui::SetNextItemOpen(false, ImGuiCond_Once);
     if (ImGui::CollapsingHeader("Keyboard shortcuts")) {
-        ImGui::TextDisabled("F10 or both stick clicks - this menu\nF12 - recenter\nF11 - head tracking on/off\nF2 - save capture (settings, last 20 s, view + frame dump)");
+        ImGui::TextDisabled("F10 or both stick clicks - this menu\nF12 - recenter\nF11 - head tracking on/off\nF2 - save a capture (both eyes, the HUD panel, settings)");
+    }
+    {   // PANELTIDY: everything for testing stays out of sight unless this is ticked (not saved)
+        bool st = bvr::overlay::show_tests();
+        if (ImGui::Checkbox("show test options", &st)) bvr::overlay::set_show_tests(st);
     }
 }
 

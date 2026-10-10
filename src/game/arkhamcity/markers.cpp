@@ -764,25 +764,25 @@ void draw_ui() {
     if (ImGui::Checkbox("grapple reticle and markers sit on their targets (each eye)", &on)) g_on.store(on);
     if (g_on.load()) {
         float r = g_radius.load();
-        if (bvr::overlay::SliderStep("   marker piece reach", &r, 0.03f, 0.4f, "%.2f")) g_radius.store(r);
+        if (bvr::overlay::show_tests() && bvr::overlay::SliderStep("   marker piece reach", &r, 0.03f, 0.4f, "%.2f")) g_radius.store(r);
         bool card = g_card.load();
-        if (ImGui::Checkbox("   markers turn with the game camera, not your head", &card)) g_card.store(card);
+        if (bvr::overlay::show_tests() && ImGui::Checkbox("   markers turn with the game camera, not your head", &card)) g_card.store(card);
         int lag = g_lag.load();
-        if (bvr::overlay::SliderStepInt("   marker frame lag", &lag, 0, 1)) g_lag.store(lag);
-        ImGui::TextDisabled("   moved pieces %u, last shift %.3f, %.3f", g_pieces.load(), g_lastDx.load(), g_lastDy.load());
+        if (bvr::overlay::show_tests() && bvr::overlay::SliderStepInt("   marker frame lag", &lag, 0, 1)) g_lag.store(lag);
+        if (bvr::overlay::show_tests()) ImGui::TextDisabled("   moved pieces %u, last shift %.3f, %.3f", g_pieces.load(), g_lastDx.load(), g_lastDy.load());
     }
     bool hd = g_hdOn.load();
     if (ImGui::Checkbox("sharp grapple reticle (redrawn at high resolution)", &hd)) g_hdOn.store(hd);
     int loaded = 0;
     for (int i = 0; i < g_hdN; ++i) loaded += g_hd[i].hd ? 1 : 0;
-    ImGui::TextDisabled("   sharp pictures in use %d of %d seen, swaps %u | other pieces left on the panel %u, clip masks %u",
+    if (bvr::overlay::show_tests()) ImGui::TextDisabled("   sharp pictures in use %d of %d seen, swaps %u | other pieces left on the panel %u, clip masks %u",
                         loaded, g_hdN, g_hdSwaps.load(), g_runRejected.load(), g_maskStops.load());
     bool aim = g_aimOn.load();
     if (ImGui::Checkbox("batarang / batclaw aim reticle sits on what it points at", &aim)) g_aimOn.store(aim);
     if (g_aimOn.load()) {
         float mn = g_aimMin.load();
-        if (bvr::overlay::SliderStep("   ignore surfaces nearer than (game units)", &mn, 50.0f, 800.0f, "%.0f")) g_aimMin.store(mn);
-        ImGui::TextDisabled("   last target distance %.0f game units, reticle pieces placed %u", g_aimDist.load(),
+        if (bvr::overlay::show_tests() && bvr::overlay::SliderStep("   ignore surfaces nearer than (game units)", &mn, 50.0f, 800.0f, "%.0f")) g_aimMin.store(mn);
+        if (bvr::overlay::show_tests()) ImGui::TextDisabled("   last target distance %.0f game units, reticle pieces placed %u", g_aimDist.load(),
                             g_aimPieces.load());
     }
 }

@@ -819,7 +819,7 @@ bool command(const char* args) {
 
 void draw_ui() {
     bool dof = !g_dofOff.load();
-    if (ImGui::Checkbox("game's depth of field (the blocky blur / glow around distant lights)", &dof)) g_dofOff.store(!dof);
+    if (bvr::overlay::show_tests() && ImGui::Checkbox("game's depth of field (the blocky blur / glow around distant lights)", &dof)) g_dofOff.store(!dof);
     float gg = g_shaftGlow.load();
     if (bvr::overlay::SliderStep("game's glow strength (around spotlights, neon, lamps)", &gg, 0.0f, 1.5f, "%.2f")) g_shaftGlow.store(gg);
     bool sm = g_shaftSmooth.load();
@@ -831,17 +831,17 @@ void draw_ui() {
     if (ImGui::Checkbox("light beams (volumetric light from spotlights and lamps)", &spr)) g_spritesOn.store(spr);
     float sd = g_spriteDim.load();
     if (bvr::overlay::SliderStep("light beams strength", &sd, 0.0f, 1.0f, "%.2f")) g_spriteDim.store(sd);
-    ImGui::TextDisabled("   beam draws %u, on their own layer %u, kept (depth of field on) %u", g_spriteSeen.load(), g_spriteDimmed.load(),
+    if (bvr::overlay::show_tests()) ImGui::TextDisabled("   beam draws %u, on their own layer %u, kept (depth of field on) %u", g_spriteSeen.load(), g_spriteDimmed.load(),
                         g_spriteOther.load());
     ImGui::TextUnformatted("find the glow (test): hide one group of see-through effects while you look at a glowing sign");
     int hg = g_hideGroup.load();
-    if (bvr::overlay::SliderStepInt("   hidden group (-1 = none)", &hg, -1, std::max(0, g_censusN - 1))) g_hideGroup.store(hg);
+    if (bvr::overlay::show_tests() && bvr::overlay::SliderStepInt("   hidden group (-1 = none)", &hg, -1, std::max(0, g_censusN - 1))) g_hideGroup.store(hg);
     if (hg >= 0 && hg < g_censusN)
-        ImGui::TextDisabled("   group %d: %s, drawn %u times", hg, g_groupDesc[hg], g_groupDraws[hg].load());
-    ImGui::TextDisabled("   %d groups seen so far", g_censusN);
+        if (bvr::overlay::show_tests()) ImGui::TextDisabled("   group %d: %s, drawn %u times", hg, g_groupDesc[hg], g_groupDraws[hg].load());
+    if (bvr::overlay::show_tests()) ImGui::TextDisabled("   %d groups seen so far", g_censusN);
     // Our own bloom (glow_mode 2) is kept in the code but not offered: the game has its own glow sprites; JJ 2026-10-08:
     // "we don't need our own one".
-    ImGui::TextDisabled("   combine passes changed %u", g_done.load());
+    if (bvr::overlay::show_tests()) ImGui::TextDisabled("   combine passes changed %u", g_done.load());
 }
 
 void settings_write(std::string& out) {

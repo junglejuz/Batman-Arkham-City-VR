@@ -1347,3 +1347,13 @@ Built + deployed (backup before-grungepack), not yet run.
 - Open for 0.2: VR-only launch (the mod also runs in a plain Steam launch), 2D/VR settings profiles (the config changes
   apply to flat play too), test tools behind one switch (frame dumps on capture), the logo-card fit and slideshow not yet
   seen in the headset.
+
+### PANELTIDY (2026-10-10, JJ: "did we remove all active redundant tests and clean everything up in the overlay?" - no)
+- One switch: the panel's last checkbox "show test options" (overlay::show_tests, not saved, off at every start). Hidden
+  behind it: Map test button; VIEW right / left eye view history, particles turn with the game camera, each eye shaped
+  for its lens; MENUS room-screen checkbox; HUD marker reach / turn-with-camera / frame lag / aim-depth near limit and
+  their counters; glow depth-of-field checkbox, hidden group, beam / group / combine counters; DLSS sub-pixel shake and
+  hand-off sync; FRAME RATE exact-pose / pose-delay block; vision game-view text; pause dirt spread + dirt screen
+  sliders; puddle reflections per eye; the Advanced and Diagnostics drawers. Captures arm the 3 MB frame / view dumps
+  only with test options on. Panel title "Batman City VR". Built + deployed (backup before-paneltidy); not in the
+  GitHub release yet (0.1.1 after JJ looks).
