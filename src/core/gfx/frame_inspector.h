@@ -1,0 +1,150 @@
+#pragma once
+// One-shot D3D11 frame inspector (DR-3): hooks the immediate context's draw
+// and clear vtable slots; when armed, records one full frame of draw events -
+// render targets + formats, viewports, constant-buffer sizes/contents, SRV0,
+// and return-address callstacks mapped to module+RVA - then writes a text
+// dump next to the log and disarms. Costs one atomic load per draw call when
+// idle. In-tree replacement for a RenderDoc frame map: the callstack RVAs are
+// exactly what the SequentialReentry scene-draw hook needs.
+
+#include <cstdint>
+
+struct IDXGISwapChain;
+
+struct ID3D11DeviceContext;
+struct ID3D11Resource;
+
+struct ID3D11Buffer;
+struct ID3D11SamplerState;
+
+namespace bvr::frame_inspector {
+
+// Hook the immediate-context vtable slots (fail-soft per slot). `ctxVtable`
+// is the vtable pointer harvested from the throwaway device's context.
+bool install(void** ctxVtable);
+
+// Arm a one-shot dump of the NEXT full Present-to-Present frame.
+//   mode 1 = lite  - events and resources only, no constant-buffer readback
+//   mode 2 = full  - plus a staging readback of the bound VS b0, ONCE PER
+//                    DISTINCT BUFFER OBJECT. Correct for an engine that renames
+//                    its constant buffer on every upload (Map/WRITE_DISCARD).
+//   mode 3 = cb    - full, plus every UpdateSubresource into a constant buffer
+//                    captured at its real size, plus the per-draw VS/PS
+//                    constant-buffer identities. For engines that REUSE one
+//                    buffer object and rewrite it, where mode 2 both
+//                    under-samples and misattributes what it does capture.
+//                    Added session 36 for BioShock Infinite (UE3, deferred).
+// count > 1 records that many CONSECUTIVE present windows (files suffixed _qN)
+// - required to see both halves of a stereo pair, since a game-thread arm
+// always opens on the same pair phase.
+void arm(int mode, int count = 1);
+
+// Frame boundary, called at the head of the Present detour: finalizes and
+// writes a recording frame, or begins a pending one.
+void on_present(IDXGISwapChain* swapchain);
+
+// ---- Session 34: an adapter-supplied per-DrawIndexed veto -------------------
+// Return true to DROP the draw. Null by default, so a game that never
+// registers one is on exactly the code path it was on before - which is the
+// point: this is core code that only BioShock 2 turns on.
+//
+// It exists because a mesh cannot be identified any other way inside a single
+// pass. BioShock 2's foreground pass is ~17 draws carrying the weapon AND the
+// Big Daddy helmet; they share a lens, a render target and a callstack, so
+// neither the fov watch nor a draw count can separate them. The index count
+// can, and it is stable for a given mesh.
+//
+// Runs on the render thread, once per DrawIndexed, guarded by the same
+// re-entrancy suppression as the recorder - so keep it to a couple of integer
+// compares and no device calls.
+using MeshSkipFn = bool (*)(unsigned indexCount);
+void set_mesh_skip(MeshSkipFn fn);
+// Batman City: the same veto for non-indexed Draw calls (the title screen's full-screen grunge
+// triangle). The callback sees the context so it can inspect the bound SRV.
+using DrawSkipFn = bool (*)(::ID3D11DeviceContext* ctx, unsigned vertexCount);
+void set_draw_skip(DrawSkipFn fn);
+// Batman City: the same for DrawIndexed (zoom stencil skip, detective-pass detection/patching).
+using DrawIndexedHookFn = bool (*)(::ID3D11DeviceContext* ctx, unsigned indexCount);
+void set_draw_indexed_hook(DrawIndexedHookFn fn);
+// RSSetViewports tap: may edit vps (n entries) in place; return true to use the edited copy.
+using ViewportTapFn = bool (*)(::ID3D11DeviceContext* ctx, unsigned n, void* vps); // vps = D3D11_VIEWPORT[n]
+void set_viewport_tap(ViewportTapFn fn);
+// PSSetSamplers tap: may replace samplers (n entries, n <= 16) in place; return true to use the edited copy.
+using SamplerTapFn = bool (*)(::ID3D11SamplerState** samplers, unsigned n);
+void set_sampler_tap(SamplerTapFn fn);
+// Called right after every game DrawIndexed has run (render thread; keep it cheap).
+using DrawAfterFn = void (*)(::ID3D11DeviceContext* ctx);
+void set_draw_indexed_after(DrawAfterFn fn);
+void set_draw_after(DrawAfterFn fn); // the same for non-indexed Draw
+// Shadow of the last upload to small constant buffers (render thread). Arm, then read.
+void set_cb_shadow(bool on);
+unsigned cb_shadow(::ID3D11Buffer* buf, void* out, unsigned maxBytes);
+// Batman City: every UpdateSubresource the GAME makes (not ours), before it runs.
+using UploadTapFn = void (*)(::ID3D11Resource* dst, const void* data, unsigned bytes);
+void set_upload_tap(UploadTapFn fn);
+unsigned mesh_skips();
+
+// Suppress capture of our own rendering (ImGui, VR copies) on this thread
+// for the current scope. Used by the Present detour after on_present().
+struct ScopedSuppress {
+    ScopedSuppress();
+    ~ScopedSuppress();
+};
+
+// Always-on constant-buffer watch (session 13): hooks Map/Unmap and, on every
+// WRITE-mapped buffer unmap, matches `pattern` (patCount floats compared at
+// float offset patFirst with tolerance) against the staged bytes; on a match
+// the floats [capFirst, capFirst+capCount) are copied into a seqlocked slot.
+// Cost per unmap on a miss is one float compare. Built for the BioShock
+// foreground-scene transform capture (the vm draws' cb0 carries a constant
+// tan-block fingerprint), but game-agnostic: the adapter supplies the floats.
+// capCount is capped at 32.
+// requiredBytes: exact buffer ByteWidth to accept (0 = any) - constant-buffer
+// tiers reuse layouts, so the same fingerprint can select different content.
+void set_cb_watch(const float* pattern, uint32_t patFirst, uint32_t patCount,
+                  uint32_t capFirst, uint32_t capCount, uint32_t requiredBytes);
+
+// Copy the latest watch capture into `out` (capCount floats). Returns false
+// if nothing was captured yet. `ageMs` (optional) gets the capture age.
+bool latest_cb_watch(float* out, uint32_t count, uint64_t* ageMs);
+
+// Lifetime accepted-capture count (diagnostic: is the watch firing at all?).
+uint32_t cb_watch_hits();
+
+// Log the Unmap-time callstack (game-exe RVAs) for the next n fingerprint
+// matches - the discovery instrument for whoever BUILDS the watched values.
+void cb_watch_log_stacks(int n);
+
+// ---- Opt-in UpdateSubresource constant-buffer tap (session 41, BSI I6) ------
+// The always-on cb watch above taps Map/Unmap - right for the Vengeance
+// remasters, which stage per-draw constants through WRITE_DISCARD maps.
+// BioShock Infinite (UE3 6829) uploads constant buffers through
+// UpdateSubresource instead (the whole reason dumpframe mode 3 exists), so a
+// LIVE lens decoder there needs this tap: when armed, every strideN-th
+// UpdateSubresource has its destination checked (constant buffer of exactly
+// requiredBytes, whole-buffer or offset-0 update) and the first kCbTapFloats
+// floats of the payload go into a small seqlock-stamped ring the game thread
+// drains. The tap captures RAW floats only - no decode, no policy, no game
+// knowledge; all of that lives in the consuming adapter.
+// DISARMED COST IS ONE RELAXED ATOMIC LOAD per UpdateSubresource. No game
+// arms it by default and only the bioshockinf adapter calls the setter, so
+// BS1/BS2 behaviour is untouched (observable: cb_upload_tap_count() stays 0
+// for the whole life of an unarmed session).
+inline constexpr uint32_t kCbTapFloats = 20; // 80 B: a row-major 4x4 + spare
+inline constexpr uint32_t kCbTapSlots = 64;
+void set_cb_upload_tap(uint32_t requiredBytes, uint32_t strideN); // bytes 0 = disarm
+// Drain samples newer than *cursor (opaque, start at 0) into `out`
+// (maxSamples x kCbTapFloats floats). Returns samples written; advances
+// *cursor. Overwritten ring slots are skipped, not invented.
+uint32_t drain_cb_upload_samples(float* out, uint32_t maxSamples, uint32_t* cursor);
+uint32_t cb_upload_tap_count(); // lifetime accepted samples (diagnostic)
+
+// Overlay section: dump buttons + last-dump status.
+void draw_debug_ui();
+
+// Lifetime draw-call census across all four draw slots. The reentry probe
+// (DR-5) snapshots this around a re-entered frame-root call: a second-call
+// delta comparable to a full frame's draws proves a real second scene render.
+uint64_t draw_call_census();
+
+} // namespace bvr::frame_inspector

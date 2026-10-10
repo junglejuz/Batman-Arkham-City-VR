@@ -1,0 +1,28 @@
+# Build output and release packages
+build/
+build*/
+dist/
+out/
+*.dll
+*.exe
+*.pdb
+*.lib
+*.obj
+*.ilk
+*.exp
+*.log
+
+# Local backups of game files and earlier builds
+backups/
+
+# Reverse-engineering workspace: holds the game's own executable - never upload
+re/
+
+# Python cache, editor
+__pycache__/
+*.pyc
+.vs/
+
+# Game art (WB): upscaled pictures ship only inside the release zip, never in the repository
+BatmanCityData/
+*.rgba

@@ -1,0 +1,61 @@
+#pragma once
+// The core/game seam. Core code sees only this interface; everything
+// engine-specific (addresses, Unreal units, UObject semantics) lives behind
+// it in game/<title>/. The interface grows one milestone at a time - see the
+// ARCHITECTURE.md decision log; onCalcView/execConsole/aim/hands/re-entry
+// land with M3+.
+
+#include "core/hooks/pattern_scan.h"
+
+#include <cstdint>
+
+namespace bvr::game {
+
+enum : uint32_t {
+    CAP_CAMERA_OVERRIDE = 1u << 0,
+    CAP_FOV_WRITE       = 1u << 1,
+    CAP_CONSOLE_EXEC    = 1u << 2, // reserved - M5
+    CAP_AIM_OVERRIDE    = 1u << 3, // reserved - M6
+    CAP_HANDS_ATTACH    = 1u << 4, // reserved - M7
+    CAP_SCENE_REENTRY   = 1u << 5, // reserved - M4
+    CAP_HUD_CAPTURE     = 1u << 6, // reserved - M9
+};
+
+struct IGameAdapter {
+    virtual ~IGameAdapter() = default;
+
+    virtual uint32_t capabilities() const = 0;
+
+    // Run pattern scans and install engine hooks. False = nothing usable
+    // resolved; the game keeps running flat either way.
+    virtual bool init(const pattern_scan::ProcessImage& image) = 0;
+
+    virtual void setFov(float hfovDeg) = 0; // <= 0 disables the per-frame write
+
+    // ImGui widgets for the overlay's adapter section. Engine-semantic UI
+    // (units, offsets) stays behind the seam this way.
+    virtual void drawDebugUi() = 0;
+
+    // Adapter-owned commands from the command.txt seam. core/framework/command
+    // calls this BEFORE its own shared vocabulary, so a game can deliberately
+    // shadow a core command. Return false for "not mine" and core logs one
+    // consistent unknown-command line.
+    //
+    // This is a CONTROL-PLANE call - once a second, on whichever thread owns the
+    // poller - not the per-frame state query the publish-don't-query rule above
+    // forbids; same shape as the overlay's drawDebugUi() call. Defaulted so an
+    // adapter that polls for itself (BS1, BS2) needs no change at all.
+    virtual bool handleCommand(const char* cmd, const char* args) {
+        (void)cmd;
+        (void)args;
+        return false;
+    }
+};
+
+// Fail-soft: any scan/hook failure is logged and the adapter reports zero
+// capabilities; the game runs flat. Implemented by game/adapter_registry.cpp,
+// which selects the adapter by host exe name.
+void init_adapter();
+IGameAdapter* adapter(); // null until init_adapter() has run, or on an unknown host exe
+
+} // namespace bvr::game
