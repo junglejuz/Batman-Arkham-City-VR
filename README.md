@@ -4,7 +4,7 @@ Batman: Arkham City in PC VR, with per-eye DLSS, an AFW speed mode, and OpenXR f
 game draws both eyes itself, every frame, from the same moment (native stereo), so depth is correct and nothing lags
 behind when the camera swings.
 
-![Left and right eye, Arkham City rooftop](images/stereo_gcr.jpg)
+![Batman on an Arkham City rooftop at night: the TYGER helicopter's searchlight, Joker balloons and the Ferris wheel](images/rooftop_hero.jpg)
 
 ## What you get
 
@@ -16,6 +16,9 @@ behind when the camera swings.
 - **OpenXR, with Virtual Desktop and SteamVR**: runs on your PC VR software's own OpenXR runtime (no extra layers or
   injectors). A separate SteamVR shortcut starts the game through SteamVR without changing your PC's VR settings.
 - **Native stereo 3D** with full head tracking (look around and lean in), on the game's own third-person camera.
+
+  ![The same moment from the left and right eye, as the mod draws them for the headset](images/rooftop_stereo.jpg)
+
 - **HUD on a panel in front of you**; the grapple reticle sits on its target, at the target's depth.
 - **Menus, the map and loading screens** on a large screen in the room, with the game's bat transitions.
 - **An in-headset VR menu**: hold both thumbsticks down (or press F10). World scale, HUD size and distance, render
@@ -36,6 +39,8 @@ Tested with: Quest 3 through Virtual Desktop, RTX 4070 Ti. A SteamVR launcher is
 
 1. Start the game once from Steam as normal, wait for the main menu, and quit (this makes the game's settings files).
 2. Download `BatmanCityVR-ArkhamCity.zip` from [Releases](../../releases) and unpack it anywhere (7-Zip works).
+   It is about 290 MB: most of that is the AI-upscaled loading-screen pictures (about 225 MB, 87 pictures at twice
+   the game's resolution) and NVIDIA's DLSS library (about 60 MB). The mod itself is a few MB.
 3. Double-click `Install-BatmanCityVR.bat`. If Windows SmartScreen appears: More info, then Run anyway. The installer
    puts everything into the game folder; you don't copy anything there yourself.
 4. Start your PC VR software and make sure it is the active OpenXR runtime (Virtual Desktop and SteamVR each have a
