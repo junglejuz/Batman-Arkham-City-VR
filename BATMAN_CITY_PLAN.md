@@ -1640,3 +1640,8 @@ and then removed when uninstalled"; NOT published)
   capsule_616x353.jpg straight from cdn.cloudflare.steamstatic.com (not in the repo) + credit line. Pushed: 544dbd6
   (rooftop images, size note), 1a17f22 (Steam artwork). The working README keeps the 0.1.2 removal text (pushed copies
   say the 0.1 text until the release).
+### RELEASE 0.1.2 2026-10-11 (JJ: "Upload") - https://github.com/junglejuz/Batman-Arkham-City-VR/releases/tag/v0.1.2
+- Source commit 3679668 on main (pushed). Asset BatmanCityVR-ArkhamCity.zip 292,395,111 bytes, sha256 558926d1...a788b;
+  GitHub's own asset digest = the local file's (download-back skipped at JJ's request: 290 MB). Notes: what's new since
+  0.1, download size, update path (installer over 0.1 keeps VR settings).
+- The cleaned-up build (04:34) was not run in the game before release (JJ knew; told twice).
