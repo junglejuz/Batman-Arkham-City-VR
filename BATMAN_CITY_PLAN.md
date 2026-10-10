@@ -1336,3 +1336,14 @@ Built + deployed (backup before-grungepack), not yet run.
   mean difference < 5 -> its HD png bound instead (else the old fingerprint route). Log "[hd] slideshow picture:
   nearest SynopsisN, mean difference D -> HD version | no match" and "slideshow index: 87 pictures". Built + deployed
   (backup before-synopsis), not yet run.
+### RELEASE 0.1 (2026-10-10, JJ: "package this game up now and write up a Github page")
+- Repo https://github.com/junglejuz/Batman-Arkham-City-VR (public, JJ). Release v0.1.0, asset BatmanCityVR-ArkhamCity.zip
+  (291 MB, 115 files; downloaded back without login, sha256 identical). Built by tools/make_package.py from the game
+  folder (tested DLLs, DLSS helper + nvngx_dlss.dll, BatmanCityData HD art - JJ chose to ship it) + JJ live settings.ini.
+- install/Install-BatmanCityVR.ps1 + Uninstall-BatmanCityVR.ps1 (+ .bat, CRLF): Steam lookup, Documents lookup, first-install
+  backup in <game>\BatmanCityVR_backup, config edits (every copy of a [section]), shortcuts (desktop + Start menu, SteamVR
+  launcher, uninstall). Practice test (scratchpad): install, second install (backup kept), uninstall - all three config
+  files byte-identical to the originals.
+- Open for 0.2: VR-only launch (the mod also runs in a plain Steam launch), 2D/VR settings profiles (the config changes
+  apply to flat play too), test tools behind one switch (frame dumps on capture), the logo-card fit and slideshow not yet
+  seen in the headset.
