@@ -111,7 +111,11 @@ BmEngine.ini line 1752 is back to `DepthOfField=True`; the file is byte-identica
 - The opening-logo video (Batman Arkham City title card, tech logos, WB / DC / Rocksteady) rebuilt at 2560x1440 by
   tools/usm_rebuild.py (same container, audio, frame timing and keyframes; MPEG-1). Test build = local lanczos enlarge.
 - Original backed up: batman_city\backups\game_files\bac_logo.usm.orig (24,940,992 bytes). To undo: copy it back over
-  BmGame\Movies\bac_logo.usm (Steam "verify files" also restores it). Game art (WB): never commit or ship.- 2026-10-10 18:05: the 2560x1440 bac_logo.usm FROZE the game -> original restored (hash checked). Replaced instead by
+  BmGame\Movies\bac_logo.usm (Steam "verify files" also restores it). Game art (WB): never commit or ship.
+- 2026-10-10 18:05: the 2560x1440 bac_logo.usm FROZE the game -> original restored (hash checked). Replaced instead by
   the mod painting `BatmanCityData\hd\logo_title.png` / `logo_tech.png` (Magnific upscales, WB art - never commit or
-  ship) over the original video. Game files unchanged.- 2026-10-10: `Binaries\Win32\BatmanCityData\hd\synopsis\` - 87 Magnific-upscaled loading-screen pictures (WB art) +
+  ship) over the original video. Game files unchanged.
+- 2026-10-10: `Binaries\Win32\BatmanCityData\hd\synopsis\` - 87 Magnific-upscaled loading-screen pictures (WB art) +
   synopsis_index.txt; drawn by the mod in place of the game's. Game files unchanged. Delete the folder to undo.
+## 2026-10-10 Release 0.1 (installer)
+Install-BatmanCityVR.ps1 applies the config changes above on the player's PC: BmEngine.ini [SystemSettings] AllowD3D11=True, MotionBlur=False, LensFlares=False and [Engine.GameEngine] MaxSmoothedFrameRate=90; UserEngine.ini (UTF-16) the same three; DefaultEngine.ini [Engine.GameEngine] (every copy of the section) MaxSmoothedFrameRate=90. Originals saved once in <game>\BatmanCityVR_backup; Uninstall-BatmanCityVR.ps1 copies them back (practice test: byte-identical).
