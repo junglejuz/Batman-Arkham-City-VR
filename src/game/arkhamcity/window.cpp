@@ -672,6 +672,7 @@ void current_launch_res(unsigned* w, unsigned* h) {
 
 bool show_logos() { return g_showLogos; }
 bool logo_video_opened() { return g_logoUsm.load(std::memory_order_relaxed); }
+void forget_logo_video() { g_logoUsm.store(false, std::memory_order_relaxed); }
 void set_movie_band(bool on) {
     g_bandEnable.store(on);
     BVR_LOG("[bc] movie band %s", on ? "ON (full-screen movies laid out in a 16:9 band)" : "off");

@@ -79,7 +79,16 @@ void set_hud_dsv(bool on); // HUDDSV: the HUD draws with its own depth-stencil (
 bool hide_wipes();
 void set_menu_open_hold(int ms); // MENUOPEN: hold after the recorded wipe when a menu opens from gameplay (700)
 void set_open_fade(bool on); // OPENFADE: menu-opening fade pieces (placement ~5.3e-5, gameplay) not drawn (default on)
-void set_glow_zone(bool on); // GLOWZONE: glow / blur pastes take their text's HUD group (default on)
+void set_load_hold(bool on);  // LOADHOLD: black after a bat wipe while the game loads (default on)
+// WIPESOUND: render thread; kind 0 = a recorded wipe to black starts (the game's own wipe, with its sound), 1 = the
+// reveal (flipped wipe after a wipe to black) starts - it has no game wipe and so no sound of its own; 2 = any bat wipe of
+// the game starts (WIPESOUND4: the sound posted at every wipe start is the bat sound).
+using WipeEventFn = void (*)(int kind);
+void set_wipe_event_hook(WipeEventFn fn);
+void set_wipe_reveal(bool on); // WIPEREVEAL: bats clear off the arriving screen after a wipe to black (default on)
+void set_pre_reveal(int ms);  // PREREVEAL: the reveal starts this long after loading goes quiet (default 500)
+void set_wipe_reveal_skip(int ms); // WIPEREVEAL: start that far into the recording (default 300)
+void set_glow_zone(int mode); // GLOWZONE / PICZONE: 0 anchor only, 1 glow pastes, 2 picture middle (default), 3, 4
 void set_map_screen(bool on); // MAPSCREEN: big untextured shapes = the map: wipe hiding paused (default on)
 void set_stage_box(bool on); // STAGEBOX / FIRSTCUT / FADESKIP (default on)
 void set_menu_cut(bool on); // MENUCUT test: outside gameplay every cut-type piece stays in the eye image

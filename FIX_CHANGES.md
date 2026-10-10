@@ -119,3 +119,5 @@ BmEngine.ini line 1752 is back to `DepthOfField=True`; the file is byte-identica
   synopsis_index.txt; drawn by the mod in place of the game's. Game files unchanged. Delete the folder to undo.
 ## 2026-10-10 Release 0.1 (installer)
 Install-BatmanCityVR.ps1 applies the config changes above on the player's PC: BmEngine.ini [SystemSettings] AllowD3D11=True, MotionBlur=False, LensFlares=False and [Engine.GameEngine] MaxSmoothedFrameRate=90; UserEngine.ini (UTF-16) the same three; DefaultEngine.ini [Engine.GameEngine] (every copy of the section) MaxSmoothedFrameRate=90. Originals saved once in <game>\BatmanCityVR_backup; Uninstall-BatmanCityVR.ps1 copies them back (practice test: byte-identical).
+## 2026-10-10 17:19 High-resolution texture pack (installed by JJ, not by the mod)
+Rewrote BmGame/CookedPCConsole *.upk + CompressionNoAlpha.tfc (860 MB). Effects seen: grime / dirt pictures resized (GRUNGEPACK), loads longer (third slideshow picture). Undo = Steam verify files (also undoes the config edits above - re-run the installer).

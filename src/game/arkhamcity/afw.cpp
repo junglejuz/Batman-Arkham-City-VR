@@ -566,8 +566,9 @@ void status_line(char* out, unsigned n) {
 void draw_ui() {
     bool v = g_on.load();
     ImGui::TextUnformatted("3D rendering");
-    if (ImGui::RadioButton("both eyes drawn every frame (native)", !v)) set_on(false);
-    if (ImGui::RadioButton("one eye drawn per frame, the other warped (AFW)", v)) set_on(true);
+    // JJ 2026-10-11: the name first, the description in brackets
+    if (ImGui::RadioButton("Native (both eyes drawn every frame)", !v)) set_on(false);
+    if (ImGui::RadioButton("AFW (one eye drawn per frame, the other warped)", v)) set_on(true);
     if (g_on.load()) {
         int m = g_mode.load();
         ImGui::TextUnformatted("warp from:");
@@ -577,6 +578,7 @@ void draw_ui() {
         if (ImGui::RadioButton("previous frame", m == 2)) g_mode.store(2);
         ImGui::SameLine();
         if (ImGui::RadioButton("both (best)", m == 3)) g_mode.store(3);
+        ImGui::TextDisabled("   smooth only when the game keeps up with the headset's rate (one eye per frame)"); // as AKVR
         uint32_t pw = 0, pf = 0;
         bvr::vr::afw_counts(&pw, &pf);
         ImGui::Text("pairs warped %u, drawn eye in both %u | warp %.2f ms | holes %.1f %% + edge %.1f %%", pw, pf, g_ms,

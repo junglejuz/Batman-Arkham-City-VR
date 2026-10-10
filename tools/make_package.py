@@ -34,6 +34,22 @@ for f in ('xinput1_3.dll', 'batman_city.dll'):
 put(os.path.join(a.game, 'BatmanCityDLSS'), os.path.join('files', 'BatmanCityDLSS'))
 put(os.path.join(a.game, 'BatmanCityData'), os.path.join('files', 'BatmanCityData'))
 put(a.settings, os.path.join('files', 'settings.ini'))
+# 0.1.1 (2026-10-11): JJ's live file is his TESTED setup, except switches he is trying out for himself - new players
+# start in the game's own third-person view (first person stays one tick in the panel).
+SHIP_OVERRIDES = {'first_person': '0'}
+sp = os.path.join(stage, 'files', 'settings.ini')
+lines = open(sp, encoding='utf-8').read().splitlines()
+for i, l in enumerate(lines):
+    k = l.split('=', 1)[0]
+    if '=' in l and k in SHIP_OVERRIDES and l != f'{k}={SHIP_OVERRIDES[k]}':
+        print(f'settings: {l} -> {k}={SHIP_OVERRIDES[k]}')
+        lines[i] = f'{k}={SHIP_OVERRIDES[k]}'
+open(sp, 'w', encoding='utf-8', newline='\n').write('\n'.join(lines) + '\n')
+# The launcher's VR render size (JJ's tested DLSS output size) and the recorded bat transition the menus replay (a fresh
+# install would only record it the first time a game is started from the main menu). Installed on first install only.
+data_dir = os.path.dirname(a.settings)
+for f in ('launch.ini', 'menu_wipe.bin'):
+    put(os.path.join(data_dir, f), os.path.join('files', f))
 for f in ('README.md', 'LICENSE-bioshock-vr.txt', 'LICENSE-luma-framework.md', 'THIRD_PARTY_NOTICES.md'):
     put(os.path.join(ROOT, f), f)
 

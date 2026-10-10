@@ -1147,6 +1147,143 @@ void watch_clocks(const void* family) {
                 clocks, running, stopped);
 }
 
+// WIPESOUND (JJ 2026-10-11: the reveal after quitting to the main menu has "no audio ... There should be" - the bats on
+// the way to black are the game's own wipe (sound included, only replaced on screen); the reveal has no game wipe).
+// Try 1 (URGFxMovie PlaySound 0xE8F090) heard nothing (log 04:16: no menu sound at all). Try 2: Wwise is linked into the
+// exe and exported: AK::SoundEngine::PostEvent(AkUniqueID event, AkGameObjectID object, flags, callback, cookie,
+// numExternals, externals) = 0x1057640 (__cdecl, returns the playing id; the string versions 0x1056D40 / 0x1056CB0 hash
+// and call it). Every posted event is noted; events posted when no wipe is starting (menu clicks, music, gameplay) count as
+// "common". The wipe's sound = an event posted within 0.7 s before / 0.4 s after a wipe to black starts that is not
+// common. The reveal posts it again (game thread) on the game object of the newest event (the main menu's own, still
+// registered after the level change). Events around wipes are logged (first 80).
+// Try 2 hooked the id version only and heard nothing at the wipe (log 04:21): the name versions 0x1056D40 / 0x1056CB0 do
+// not call it. All three end in 0x1056BD0 (cdecl: event id, game object, flags, callback, cookie, externals - id first:
+// the name versions push the hashed name last; externals may be null, checked at +0x4C) - hooked there now.
+using AkPostEventFn = uint32_t(__cdecl*)(uint32_t eventId, uint32_t gameObject, uint32_t flags, void* callback,
+                                         void* cookie, void* externals);
+AkPostEventFn g_akPostOrig = nullptr;
+constexpr uintptr_t kAkPostEvent = 0x1056BD0;
+SRWLOCK g_soundLock = SRWLOCK_INIT;
+struct AkSeen { uint32_t id, obj; ULONGLONG ms; uint32_t posts; bool nearWipe; };
+AkSeen g_akSeen[256] = {};
+int g_akSeenN = 0;
+uint32_t g_akRecentId[32] = {}, g_akRecentObj[32] = {};
+ULONGLONG g_akRecentMs[32] = {};
+int g_akRecentN = 0;
+uint32_t g_wipeSoundId = 0, g_newestObj = 0;
+// WIPESOUND4 (log 04:25:08: at the quit wipe's start the game posted 990593514 / 3809399880 (15 ms before) and 3904589100
+// (0 ms); the "not common" rule threw them out because the bat sound plays at EVERY bat wipe, e.g. opening the pause
+// menu). Now: each event posted within 60 ms of a game wipe start (event 2) scores one point per wipe; the bat sound =
+// the event at the most wipe starts (ties: the one nearest the start).
+struct WipeScore { uint32_t id, wipes, lastWipe; uint32_t bestDt; };
+WipeScore g_wipeScore[64] = {};
+int g_wipeScoreN = 0;
+uint32_t g_wipeSerial = 0;
+ULONGLONG g_wipeStartMs = 0;
+void wipe_score(uint32_t id, uint32_t dt) { // under g_soundLock
+    WipeScore* w = nullptr;
+    for (int i = 0; i < g_wipeScoreN; ++i)
+        if (g_wipeScore[i].id == id) w = &g_wipeScore[i];
+    if (!w && g_wipeScoreN < 64) { w = &g_wipeScore[g_wipeScoreN++]; *w = WipeScore{id, 0, 0, 999}; }
+    if (!w || w->lastWipe == g_wipeSerial) return;
+    w->lastWipe = g_wipeSerial;
+    ++w->wipes;
+    if (dt < w->bestDt) w->bestDt = dt;
+    const WipeScore* best = nullptr;
+    for (int i = 0; i < g_wipeScoreN; ++i) {
+        const WipeScore& c = g_wipeScore[i];
+        if (!best || c.wipes > best->wipes || (c.wipes == best->wipes && c.bestDt < best->bestDt)) best = &c;
+    }
+    if (best && best->id != g_wipeSoundId) {
+        g_wipeSoundId = best->id;
+        BVR_LOG("[bc] WIPESOUND: the bat sound = Wwise event %u (at %u game wipe starts, %u ms from the start)", best->id,
+                best->wipes, best->bestDt);
+    }
+}
+ULONGLONG g_quitWipeMs = 0;
+std::atomic<bool> g_playWipeSound{false}, g_wipeSoundOn{true};
+std::atomic<uint32_t> g_akLogged{0};
+AkSeen* ak_seen(uint32_t id) { // under g_soundLock
+    for (int i = 0; i < g_akSeenN; ++i)
+        if (g_akSeen[i].id == id) return &g_akSeen[i];
+    if (g_akSeenN >= 256) return nullptr;
+    g_akSeen[g_akSeenN] = AkSeen{id, 0, 0, 0, false};
+    return &g_akSeen[g_akSeenN++];
+}
+// The wipe's sound from the recent events around the wipe start t (under g_soundLock): not common = never posted far
+// from a wipe.
+void ak_learn(ULONGLONG t, const char* when) {
+    for (int k = 0; k < 32 && k < g_akRecentN; ++k) {
+        const int i = (g_akRecentN - 1 - k) & 31;
+        const ULONGLONG ms = g_akRecentMs[i];
+        if (ms + 1500 < t || ms > t + 600) continue;
+        const AkSeen* s = ak_seen(g_akRecentId[i]);
+        if (!s || s->posts > 1 && !s->nearWipe) continue; // a menu click / music: also posted without a wipe
+        if (g_wipeSoundId != g_akRecentId[i]) {
+            g_wipeSoundId = g_akRecentId[i];
+            BVR_LOG("[bc] WIPESOUND: the wipe's sound = Wwise event %u (game object %u, %lld ms from the wipe start, %s)",
+                    g_wipeSoundId, g_akRecentObj[i], (long long)ms - (long long)t, when);
+        }
+        return;
+    }
+}
+uint32_t __cdecl ak_post_detour(uint32_t id, uint32_t obj, uint32_t flags, void* cb, void* cookie, void* ext) {
+    const ULONGLONG now = GetTickCount64();
+    bool logIt = false;
+    AcquireSRWLockExclusive(&g_soundLock);
+    const bool nearWipe = g_quitWipeMs && now + 1500 >= g_quitWipeMs && now <= g_quitWipeMs + 600;
+    if (AkSeen* s = ak_seen(id)) {
+        if (!nearWipe && s->posts && now - s->ms > 1500) s->nearWipe = false; // posted again on its own: common
+        if (!s->posts) s->nearWipe = nearWipe;
+        ++s->posts;
+        s->ms = now;
+        s->obj = obj;
+    }
+    const int i = g_akRecentN++ & 31;
+    g_akRecentId[i] = id; g_akRecentObj[i] = obj; g_akRecentMs[i] = now;
+    g_newestObj = obj;
+    if (g_wipeStartMs && now <= g_wipeStartMs + 60) wipe_score(id, uint32_t(now - g_wipeStartMs));
+    logIt = false; // per-event logging was a probe (WIPESOUND 1-3); the learned event is logged by wipe_score
+    ReleaseSRWLockExclusive(&g_soundLock);
+    if (logIt && g_akLogged.fetch_add(1, std::memory_order_relaxed) < 80)
+        BVR_LOG("[bc] Wwise event %u on object %u%s", id, obj, nearWipe ? " (at the wipe start)" : "");
+    return g_akPostOrig(id, obj, flags, cb, cookie, ext);
+}
+void wipe_sound_event(int kind) { // render thread (gfx_hud)
+    const ULONGLONG now = GetTickCount64();
+    AcquireSRWLockExclusive(&g_soundLock);
+    if (kind == 0) {
+        g_quitWipeMs = now;
+    } else if (kind == 2) {
+        g_wipeStartMs = now;
+        ++g_wipeSerial;
+        for (int k = 0; k < 32 && k < g_akRecentN; ++k) {
+            const int i = (g_akRecentN - 1 - k) & 31;
+            if (g_akRecentMs[i] + 60 >= now) wipe_score(g_akRecentId[i], uint32_t(now - g_akRecentMs[i]));
+        }
+    } else if (kind == 1) {
+        if (g_wipeSoundId && g_wipeSoundOn.load(std::memory_order_relaxed)) g_playWipeSound.store(true);
+        else BVR_LOG("[bc] WIPESOUND: reveal without sound (%s)", g_wipeSoundId ? "switched off" : "no wipe sound heard yet");
+    }
+    ReleaseSRWLockExclusive(&g_soundLock);
+}
+void play_wipe_sound_now() { // game thread
+    AcquireSRWLockExclusive(&g_soundLock);
+    const uint32_t id = g_wipeSoundId, obj = g_newestObj;
+    ReleaseSRWLockExclusive(&g_soundLock);
+    if (!id || !g_akPostOrig) return;
+    uint32_t r = 0;
+    __try {
+        r = g_akPostOrig(id, obj, 0, nullptr, nullptr, nullptr);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        BVR_LOG("[bc] WIPESOUND: posting event %u FAULTED - switched off", id);
+        g_wipeSoundOn.store(false);
+        return;
+    }
+    BVR_LOG("[bc] WIPESOUND: event %u posted with the reveal on object %u -> playing id %u%s", id, obj, r,
+            r ? "" : " (REFUSED by Wwise)");
+}
+
 void* g_localPlayer = nullptr; // game thread (FIRSTPERSON)
 void fp_update(); // FIRSTPERSON, below
 
@@ -1167,6 +1304,7 @@ void* __fastcall calc_detour(void* self, void* edx, void* family, float* loc, in
         const bool pauseScreen = paused || room_overlay::pause_screen_now();
         bvr::gfx_hud::set_halo(pauseScreen && !title ? g_pauseHalo.load(std::memory_order_relaxed) : 0.0f);
     }
+    if (g_playWipeSound.exchange(false)) play_wipe_sound_now(); // WIPESOUND
     g_localPlayer = self; // ULocalPlayer (FIRSTPERSON: +0x30 = the player controller)
     fp_update();          // before the view is built (the FSceneView ctor runs inside)
     void* view = g_calcOrig(self, edx, family, loc, rot, viewport, drawer);
@@ -1210,6 +1348,27 @@ bool g_fpEyeValid = false;     // this frame's eye point (game thread, before th
 std::atomic<uint32_t> g_fpFrames{0};
 constexpr int kPCPawnScanBegin = 0x1AC, kPCSize = 0x590, kPawnController = 0x1CC, kPawnLocation = 0x48,
               kPawnEyeHeight = 0x2A8, kPawnSizeMin = 0x444;
+// HEADCAM (JJ 2026-10-11: "we need the camera attached to the head ... when flying the head comes forward and it goes
+// through the camera ... attached at a fixed distance from the head"): the eye point follows Batman's head bone. Static RE
+// (re/BatmanAC.exe.unpacked.exe): USkeletalMeshComponent::GetBoneLocation 0x850EE0 (thiscall: FVector* out, FName,
+// int space 0 = world; ret 0x10; zero vector when the bone is not found; called by execGetBoneLocation 0x8540B0);
+// "Bip01_Head" is hard-coded FName 0x620 (name table 0x47C5C1, Bip01_Neck1 0x61F); the game itself calls it with
+// pawn +0x36C (= Pawn.Mesh, 0xD505B7); SkeletalMeshComponent vtable 0x13158C8, size 0x6C0, its SkeletalMesh +0x1A0.
+// References: MELE VR convo_fp.cpp (head bone used only within a box around the steady eye point, smoothed: "a head bone
+// bobs"), BS Infinite VR bones.h; playbook CAM-001 (head pose once). The head - eye-point offset is smoothed (fp_head_smooth
+// seconds, real time - the two eye passes of a frame get the same point) and capped; outside the cap = the steady eye.
+std::atomic<bool> g_fpHead{true};
+std::atomic<float> g_fpHeadSmoothS{0.08f};
+float g_fpHeadOff[3] = {};
+bool g_fpHeadOffValid = false;
+LARGE_INTEGER g_fpHeadLastT = {};
+std::atomic<uint32_t> g_fpHeadFrames{0}, g_fpHeadMisses{0};
+constexpr uintptr_t kGetBoneLocation = 0x850EE0;
+constexpr int kPawnMesh = 0x36C, kMeshSkelMesh = 0x1A0, kSkelMeshCompSize = 0x6C0;
+constexpr uint32_t kNameBip01Head = 0x620;
+constexpr float kHeadCapUU = 140.0f; // ~1.5 m: anything further is not his head
+using GetBoneLocationFn = float*(__thiscall*)(void* mesh, float* out, uint32_t nameIndex, uint32_t nameNumber, int space);
+void fp_head_follow(uintptr_t pawn); // below
 
 bool fp_object(uintptr_t p, unsigned bytes) {
     if (p < 0x10000 || (p & 3) || !pattern_scan::is_memory_valid(reinterpret_cast<void*>(p), bytes)) return false;
@@ -1248,7 +1407,30 @@ void fp_update() {
             eyeH < -50.0f || eyeH > 300.0f)
             return;
         g_fpEye[0] = loc[0]; g_fpEye[1] = loc[1]; g_fpEye[2] = loc[2] + eyeH;
+        // FPGATE (JJ 2026-10-11 02:24: "no 3D geometry is showing on the main menu anymore" with first person on): the
+        // main menu has a stand-in pawn of its own (log: eye -3632, 864, -80, no mesh) far from the menu scene's camera,
+        // and first person moved the camera there. First person only in gameplay: not on the title screen, not in
+        // movies, and only while the game's camera is near Batman (third person sits ~2-4 m behind him).
+        {
+            const float dx = g_fpEye[0] - g_loc[0], dy = g_fpEye[1] - g_loc[1], dz = g_fpEye[2] - g_loc[2];
+            const float dist = sqrtf(dx * dx + dy * dy + dz * dz), maxUU = 12.0f * g_uuPerM.load(std::memory_order_relaxed);
+            // JJ 02:2x: "must always be disabled when going into main menu ... or any other loading screen and menus"
+            const char* why = room_overlay::title_screen_now() ? "title screen / main menu"
+                              : movie_playing_now()             ? "movie / loading screen"
+                              : g_gamePaused.load(std::memory_order_relaxed) || room_overlay::pause_screen_now()
+                                  ? "menu (pause, map, upgrades)"
+                              : !(dist < maxUU)                 ? "game camera far from Batman"
+                                                                : nullptr;
+            static const char* s_why = "";
+            if ((why ? why : "") != s_why) {
+                s_why = why ? why : "";
+                BVR_LOG("[bc] first person %s%s (game camera %.1f m from his eyes)", why ? "paused: " : "", why ? why : "active again",
+                        dist / g_uuPerM.load(std::memory_order_relaxed));
+            }
+            if (why) return; // the game's own camera this frame
+        }
         g_fpEyeValid = true;
+        fp_head_follow(pawn); // HEADCAM: g_fpEye moved with his head
         static bool s_logged = false;
         if (!s_logged) {
             s_logged = true;
@@ -1258,6 +1440,45 @@ void fp_update() {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_fpEyeValid = false;
     }
+}
+
+void fp_head_follow(uintptr_t pawn) { // game thread, inside fp_update's __try
+    if (!g_fpHead.load(std::memory_order_relaxed)) { g_fpHeadOffValid = false; return; }
+    auto miss = [](const char* why) {
+        g_fpHeadOffValid = false;
+        if (g_fpHeadMisses.fetch_add(1, std::memory_order_relaxed) < 6) BVR_LOG("[bc] first person head: %s - steady eye point", why);
+    };
+    const uintptr_t mesh = *reinterpret_cast<const uintptr_t*>(pawn + kPawnMesh);
+    if (!fp_object(mesh, kSkelMeshCompSize)) return miss("no mesh at pawn +0x36C");
+    const uintptr_t skel = *reinterpret_cast<const uintptr_t*>(mesh + kMeshSkelMesh);
+    if (!fp_object(skel, 0x100)) return miss("mesh has no skeleton");
+    float head[3] = {};
+    reinterpret_cast<GetBoneLocationFn>(kGetBoneLocation)(reinterpret_cast<void*>(mesh), head, kNameBip01Head, 0, 0);
+    if (!std::isfinite(head[0]) || !std::isfinite(head[1]) || !std::isfinite(head[2]) ||
+        (head[0] == 0.0f && head[1] == 0.0f && head[2] == 0.0f))
+        return miss("no Bip01_Head bone");
+    const float d[3] = {head[0] - g_fpEye[0], head[1] - g_fpEye[1], head[2] - g_fpEye[2]};
+    if (fabsf(d[0]) > kHeadCapUU || fabsf(d[1]) > kHeadCapUU || fabsf(d[2]) > kHeadCapUU) {
+        char b[96];
+        snprintf(b, sizeof(b), "head %.0f, %.0f, %.0f UU from the eye point (cap %.0f)", d[0], d[1], d[2], kHeadCapUU);
+        return miss(b);
+    }
+    LARGE_INTEGER now, f;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&f);
+    const float dt = g_fpHeadLastT.QuadPart ? float(double(now.QuadPart - g_fpHeadLastT.QuadPart) / double(f.QuadPart)) : 0.0f;
+    g_fpHeadLastT = now;
+    const float tau = g_fpHeadSmoothS.load(std::memory_order_relaxed);
+    const float a = !g_fpHeadOffValid || tau <= 0.001f ? 1.0f : 1.0f - expf(-(dt > 0.1f ? 0.1f : dt) / tau);
+    for (int i = 0; i < 3; ++i) {
+        g_fpHeadOff[i] += (d[i] - g_fpHeadOff[i]) * a;
+        g_fpEye[i] += g_fpHeadOff[i];
+    }
+    g_fpHeadOffValid = true;
+    if (g_fpHeadFrames.fetch_add(1, std::memory_order_relaxed) == 0)
+        BVR_LOG("[bc] first person head: mesh %08X (vtable %08X), Bip01_Head - eye point = %.1f, %.1f, %.1f UU (%u frames)",
+                unsigned(mesh), unsigned(*reinterpret_cast<const uintptr_t*>(mesh)), d[0], d[1], d[2],
+                g_fpHeadFrames.load(std::memory_order_relaxed));
 }
 
 // The game camera's view matrix (row vectors: v_view = (v - origin) * R, translation row = -origin * R) moved to the
@@ -1480,6 +1701,7 @@ std::string settings_text() {
     s += billboard::enabled() ? "particles_face_game_camera=1\n" : "particles_face_game_camera=0\n";
     glow::settings_write(s);
     afw::settings_write(s);
+    s += screen_hd::settings_line(); // LOADTIME: HD loading pictures on / off
     // TIDY: the bat-wipe / menu-fade switches are no longer saved (fixed on).
     {
         char hb[48];
@@ -1487,9 +1709,9 @@ std::string settings_text() {
         s += hb;
     }
     {
-        char fb[128];
-        snprintf(fb, sizeof(fb), "first_person=%d\nfp_forward_cm=%.1f\nfp_up_cm=%.1f\n", g_fp.load() ? 1 : 0,
-                 g_fpFwdCm.load(), g_fpUpCm.load());
+        char fb[192];
+        snprintf(fb, sizeof(fb), "first_person=%d\nfp_forward_cm=%.1f\nfp_up_cm=%.1f\nfp_head=%d\nfp_head_smooth=%.3f\n",
+                 g_fp.load() ? 1 : 0, g_fpFwdCm.load(), g_fpUpCm.load(), g_fpHead.load() ? 1 : 0, g_fpHeadSmoothS.load());
         s += fb;
     }
     s += "hud_eye_depth=" + std::to_string(bvr::vr::hud_eyes()) + "\n";
@@ -1588,6 +1810,7 @@ void settings_load() {
         else if (reflect::settings_read(k, val)) {}
         else if (glow::settings_read(k, val)) {}
         else if (afw::settings_read(k, val)) {}
+        else if (screen_hd::settings_read(k, val)) {}
         else if (!strcmp(k, "particles_face_game_camera")) billboard::set_enabled(on);
         else if (!strcmp(k, "transition_cuts_full_view") || !strcmp(k, "hide_loading_fade_box") ||
                  !strcmp(k, "hide_menu_wipes") || !strcmp(k, "wipe_replay") || !strcmp(k, "wipe_flip") ||
@@ -1597,6 +1820,8 @@ void settings_load() {
         else if (!strcmp(k, "first_person")) g_fp.store(on);
         else if (!strcmp(k, "fp_forward_cm")) { if (v >= -20.0f && v <= 80.0f) g_fpFwdCm.store(v); }
         else if (!strcmp(k, "fp_up_cm")) { if (v >= -40.0f && v <= 40.0f) g_fpUpCm.store(v); }
+        else if (!strcmp(k, "fp_head")) g_fpHead.store(on); // HEADCAM
+        else if (!strcmp(k, "fp_head_smooth")) { if (v >= 0.0f && v <= 1.0f) g_fpHeadSmoothS.store(v); }
         else if (!strncmp(k, "hud_zone_", 9)) {
             float zs = 1, zx = 0, zy = 0;
             if (sscanf_s(val, "%f,%f,%f", &zs, &zx, &zy) == 3 && zs >= 0.3f && zs <= 1.5f && fabsf(zx) <= 0.6f && fabsf(zy) <= 0.6f)
@@ -1691,6 +1916,11 @@ bool install() {
         if (wait_for_plaintext(addr::kSceneViewWorldToScreen, kW2S, sizeof(kW2S), "FSceneView WorldToScreen"))
             hook(addr::kSceneViewWorldToScreen, reinterpret_cast<void*>(&w2s_detour),
                  reinterpret_cast<void**>(&g_w2sOrig), "FSceneView WorldToScreen (marker probe)");
+        static const uint8_t kAkPost[] = {0x83, 0xEC, 0x30, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x56}; // sub esp,30; mov eax,1; push esi
+        if (wait_for_plaintext(kAkPostEvent, kAkPost, sizeof(kAkPost), "Wwise PostEvent"))
+            hook(kAkPostEvent, reinterpret_cast<void*>(&ak_post_detour), reinterpret_cast<void**>(&g_akPostOrig),
+                 "Wwise PostEvent (WIPESOUND)");
+        bvr::gfx_hud::set_wipe_event_hook(&wipe_sound_event);
         static const uint8_t kStageRect[] = {0x83, 0xEC, 0x20, 0x53, 0x8B, 0x5C, 0x24, 0x28, 0x56, 0x57};
         if (wait_for_plaintext(addr::kStageRectToValue, kStageRect, sizeof(kStageRect), "Stage rect"))
             hook(addr::kStageRectToValue, reinterpret_cast<void*>(&stage_rect_detour),
@@ -1779,7 +2009,14 @@ bool handle_command(const char* args) {
     else if (starts("mapscreen ")) bvr::gfx_hud::set_map_screen(atoi(args + 10) != 0); // MAPSCREEN
     else if (starts("menuhold ")) bvr::gfx_hud::set_menu_open_hold(atoi(args + 9)); // MENUOPEN
     else if (starts("openfade ")) bvr::gfx_hud::set_open_fade(atoi(args + 9) != 0); // OPENFADE
-    else if (starts("glowzone ")) bvr::gfx_hud::set_glow_zone(atoi(args + 9) != 0); // GLOWZONE
+    else if (starts("glowzone ")) bvr::gfx_hud::set_glow_zone(atoi(args + 9)); // GLOWZONE / PICZONE
+    else if (starts("wipehold ")) bvr::gfx_hud::set_load_hold(atoi(args + 9) != 0); // LOADHOLD
+    else if (starts("wipereveal skip ")) bvr::gfx_hud::set_wipe_reveal_skip(atoi(args + 16)); // WIPEREVEAL
+    else if (starts("wipereveal pre ")) bvr::gfx_hud::set_pre_reveal(atoi(args + 15)); // PREREVEAL
+    else if (starts("wipereveal ")) bvr::gfx_hud::set_wipe_reveal(atoi(args + 11) != 0); // WIPEREVEAL
+    else if (starts("wipesound play")) g_playWipeSound.store(true); // test: the learned sound now
+    else if (starts("wipesound id ")) { AcquireSRWLockExclusive(&g_soundLock); g_wipeSoundId = uint32_t(strtoul(args + 13, nullptr, 10)); ReleaseSRWLockExclusive(&g_soundLock); BVR_LOG("[bc] WIPESOUND: event set to %s", args + 13); }
+    else if (starts("wipesound ")) { g_wipeSoundOn.store(atoi(args + 10) != 0); BVR_LOG("[bc] WIPESOUND %s", g_wipeSoundOn.load() ? "on" : "off"); }
     else if (starts("wipedebug ")) bvr::gfx_hud::set_wipe_debug(atoi(args + 10) != 0); // auto captures 0.4 s into wipe replays
     else if (starts("hidewipes ")) { bvr::gfx_hud::set_hide_wipes(atoi(args + 10) != 0); BVR_LOG("[bc] hide menu wipes %d (MAPTEST)", atoi(args + 10)); }
     else if (starts("hd ")) screen_hd::command(args + 3); // HD SCREENS
@@ -1826,6 +2063,8 @@ bool handle_command(const char* args) {
     else if (starts("fp on")) set_first_person(true);
     else if (starts("fp off")) set_first_person(false);
     else if (starts("fp fwd ")) { g_fpFwdCm.store(static_cast<float>(atof(args + 7))); BVR_LOG("[bc] first person forward %.1f cm", g_fpFwdCm.load()); }
+    else if (starts("fp head ")) { g_fpHead.store(atoi(args + 8) != 0); BVR_LOG("[bc] first person head follow %s", g_fpHead.load() ? "ON" : "off"); }
+    else if (starts("fp smooth ")) { g_fpHeadSmoothS.store(static_cast<float>(atof(args + 10))); BVR_LOG("[bc] first person head smoothing %.3f s", g_fpHeadSmoothS.load()); }
     else if (starts("fp up ")) { g_fpUpCm.store(static_cast<float>(atof(args + 6))); BVR_LOG("[bc] first person up %.1f cm", g_fpUpCm.load()); }
     else if (starts("movieband off")) window::set_movie_band(false);
     else if (starts("glow ")) glow::command(args + 5);
@@ -1919,8 +2158,22 @@ void draw_ui() {
             float f = g_fpFwdCm.load(), u = g_fpUpCm.load();
             if (bvr::overlay::SliderStep("   camera in front of his face (cm)", &f, -20.0f, 80.0f, "%.0f")) g_fpFwdCm.store(f);
             if (bvr::overlay::SliderStep("   camera up / down (cm)", &u, -40.0f, 40.0f, "%.0f")) g_fpUpCm.store(u);
+            bool hf = g_fpHead.load(); // HEADCAM
+            if (ImGui::Checkbox("   camera follows his head (gliding, animations)", &hf)) g_fpHead.store(hf);
+            if (hf) {
+                float sm = g_fpHeadSmoothS.load();
+                if (bvr::overlay::SliderStep("   head smoothing (s) - higher = steadier, lags more", &sm, 0.0f, 0.5f, "%.2f"))
+                    g_fpHeadSmoothS.store(sm);
+                if (bvr::overlay::show_tests())
+                    ImGui::TextDisabled("      head frames %u, fell back to the steady eye point %u", g_fpHeadFrames.load(),
+                                        g_fpHeadMisses.load());
+            }
         }
     }
+    // STEREOSECTION (JJ 2026-10-11: "copy Batman Arkham Knight's implementation ... their own menu section called stereo
+    // rendering"): AKVR hooks.cpp - its own section, open the first time, above VIEW (was inside FRAME RATE).
+    ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+    if (ImGui::CollapsingHeader("STEREO RENDERING")) afw::draw_ui();
     if (ImGui::CollapsingHeader("VIEW")) {
         float uu = g_uuPerM.load();
         if (bvr::overlay::SliderStep("world scale  (game units per metre)", &uu, 30.0f, 200.0f, "%.0f")) g_uuPerM.store(uu);
@@ -2032,6 +2285,7 @@ void draw_ui() {
         if (bvr::overlay::show_tests() && ImGui::Checkbox("logos / loading: screen drawn into the 3D view (steadier in Virtual Desktop)", &rs))
             bvr::vr::set_screen_room(rs);
         if (bvr::overlay::show_tests()) ImGui::TextDisabled("   off = the older floating panel");
+        screen_hd::draw_ui(); // LOADTIME: HD loading pictures switch + loading-screen lengths
         float d = 0, w = 0;
         bvr::vr::get_screen_quad(&d, &w);
         bool ch = bvr::overlay::SliderStep("movie / loading screen distance (m)", &d, 0.8f, 6.0f, "%.2f");
@@ -2053,8 +2307,7 @@ void draw_ui() {
     if (ImGui::CollapsingHeader("FRAME RATE")) {
         ImGui::Text("game frames %.0f /s, eye images %.0f /s (%s)", g_rateDraws, g_ratePresents,
                     stereo_active() && !afw::on() ? "two per frame" : "one per frame");
-        afw::draw_ui(); // AFW (§11): native 3D or one eye drawn + the other warped
-        ImGui::Separator();
+        ImGui::Separator(); // AFW's choice moved to its own STEREO RENDERING section (STEREOSECTION)
         int lock = g_fpsLock.load();
         ImGui::TextUnformatted("hold the game at:");
         ImGui::SameLine(); if (ImGui::RadioButton("off", lock == 0)) g_fpsLock.store(0);

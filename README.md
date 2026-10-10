@@ -76,7 +76,8 @@ settings first.
 ## Removing it
 
 Run **Uninstall Batman City VR** from the Start menu (or `Uninstall-BatmanCityVR.bat` in the game folder). It
-removes the mod and the shortcuts and puts your game settings back as they were.
+removes the mod and the shortcuts, puts your game settings back as they were, and deletes the mod's own VR settings
+and logs (in `%LOCALAPPDATA%\Batman_City`).
 
 ## Credits
 

@@ -219,7 +219,7 @@ void DrawUi(bool vrPanel) {
     ImGui::SetNextWindowPos(ImVec2(0, 0), vrPanel ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
     if (vrPanel) ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
     else ImGui::SetNextWindowSize(ImVec2(760, 900), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowBgAlpha(0.86f);
+    ImGui::SetNextWindowBgAlpha(0.96f); // JJ 2026-10-11: "a bit less transparent" (was 0.86)
     ImGui::Begin("Batman City VR", nullptr,
                  vrPanel ? (ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoTitleBar)

@@ -182,6 +182,12 @@ if (-not (Test-Path (Join-Path $data 'settings.ini'))) {
 } else {
     Say '  Your VR settings from an earlier install are kept.'
 }
+# The VR render size the launcher starts the game at, and the recorded bat transition the menus replay (otherwise only
+# recorded the first time a game is started from the main menu). First install only, like the settings.
+foreach ($f in 'launch.ini', 'menu_wipe.bin') {
+    $src = Join-Path $Here "files\$f"
+    if ((Test-Path $src) -and -not (Test-Path (Join-Path $data $f))) { Copy-Item $src (Join-Path $data $f) }
+}
 
 # ---- 5. the game's settings for VR -----------------------------------------------------------------
 Step '4. Setting the game up for VR'

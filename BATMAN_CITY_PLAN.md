@@ -1357,3 +1357,286 @@ Built + deployed (backup before-grungepack), not yet run.
   sliders; puddle reflections per eye; the Advanced and Diagnostics drawers. Captures arm the 3 MB frame / view dumps
   only with test options on. Panel title "Batman City VR". Built + deployed (backup before-paneltidy); not in the
   GitHub release yet (0.1.1 after JJ looks).
+## TEST PLAN LOADFIX (JJ 2026-10-11 ~01:15: loading screens into the game show the logo cards first; the slideshow does not
+look higher resolution; the glow under "LEVEL UP" still sits under it; panel a bit less transparent; 3D options named
+"Native" / "AFW" with the description in brackets)
+Looked up: own notes HD SCREENS / HD LOGO / LOGOFIT / SYNOPSIS / GLOWZONE (this file); log 01:10 (LIVE); capture 173005 +
+framedump 173004_q0 (LIVE); playbook @ b955f224 symptom-index / failure-atlas / pattern-catalog: nothing on loading-screen
+resolution or HUD grouping; VR_HUD_GUIDE: only SKVR FULLSCREEN (grouped items), not this.
+Causes (LIVE evidence):
+1. Logo cards over loading screens: logo_frame ran while "the last .usm opened was bac_logo" - loading screens open no
+   .usm, so it stayed true all session (log 01:10:39.554: "logo video measured on screen" on the loading screen, shapes
+   disagree). Fix LOGOONCE: the flag is cleared when the logo playback ends (window::forget_logo_video).
+2. Slideshow not sharper: the HD picture IS bound (log: Synopsis9/8/10 LOADED), but the game sets a 1024x512 viewport
+   (game stack EED08D/F025A2) right before each picture's first draw and 256x128 before the 256x128 picture = it copies
+   each picture into a render target of its own size and the loading screen shows that target -> our 2048x1024 went
+   through a 1024x512 copy. Ceiling after that: the game window is 1438x1536 with DLSS Balanced; the room screen
+   (2.4 m at 1.75 m, ~69 deg) gets ~1450 headset pixels across - the same, so the window is not the limit.
+   Fix HDFOLLOW: a render target of the picture's size last drawn from an HD picture gets the HD picture wherever it is
+   sampled (table cleared when the movie ends; a picture without HD drawn into it drops it). HD textures from load_named
+   now have full mips (2048 shown ~1400 wide).
+3. LEVEL UP glow: capture 173005 - the glow's place = the text moved by group 0 (top left: 0.9x toward the corner, 0.1
+   down; JJ's hud_zone_0=0.90,0.00,-0.10), text in group 1 (identity): predicted -0.100,0.501 vs measured -0.106,0.505.
+   The glow is NOT a render-target paste (no render-target texture on the HUD sheet in framedump 173004) - GLOWZONE never
+   fired. Its anchor lies in the top-left zone, its picture under the text. Vertex constants floats 16..31 = the texture
+   mapping (1024x256 picture: v scale 0.0002 = 1/(256*20)). Fix PICZONE: glowzone mode 2 (default) - a picture piece
+   (>= 64x16) goes to the zone of its picture's middle when the next piece agrees; mode 3 the middle alone; mode 4 a piece
+   unlike both neighbours takes the next piece's zone. Log "gfx_hud: picture piece ... -> MOVED / left" once per kind.
+4. Panel: background 0.86 -> 0.96; radio buttons "Native (both eyes drawn every frame)" / "AFW (one eye drawn per frame,
+   the other warped)".
+
+| # | command / switch | what it proves | how to judge |
+|---|---|---|---|
+| T1 | main menu -> Continue (loading screen) | LOGOONCE | log "[hd] logo video ended" after the logos; no "logo video measured" during the loading screen; JJ: no logo cards |
+| T2 | same loading screen | HDFOLLOW fired | log "HD picture copied by the game into a 1024x512 render target"; `bc hd status`: follow swaps > 0; JJ: sharper |
+| T3 | `bc hd follow 0` / `1` on the next slideshow picture | the A/B | capture both; edge detail of the picture |
+| T4 | gameplay with LEVEL UP on screen | PICZONE | log "picture piece ... MOVED" for the glow; JJ: glow under the text, nothing else moved |
+| T5 | `bc glowzone 1` / `2` | A/B against the old rule | JJ / panel capture: glow jumps back down-left at 1 |
+| T6 | panel: transparency + labels | JJ | readable |
+Follow-ups: T2 no "copied" line -> the copy is not a plain draw (check the viewport-set stack EED08D); T4 glow still
+wrong + log shows its middle in group 1 but next piece elsewhere -> `bc glowzone 3`; no picture line at all -> `bc
+glowzone 4`, then `bc huddump` while LEVEL UP is shown; health / other widgets moved -> mode 1 and read the log lines.
+
+### LOADFIX BUILD 2026-10-11 01:27 (STATIC: built clean + deployed; backup backups\batman_city.dll.before-hdfollow; not run)
+Files: game/arkhamcity/screen_hd.cpp (LOGOONCE, HDFOLLOW, mips, `bc hd follow 0|1`, status line), window.cpp/.h
+(forget_logo_video), core/gfx/gfx_hud.cpp/.h (PICZONE, set_glow_zone(int)), scene.cpp (`bc glowzone N`),
+core/ui/overlay.cpp (bg 0.96), afw.cpp (labels).
+
+### LOADFIX RESULTS 2026-10-11 01:29-01:33 (JJ HEADSET + LIVE log)
+- T1 PASS (JJ): no logo cards on the loading screens; log "[hd] logo video ended" 01:29:26.
+- T2 FAIL: JJ "still don't look that much better"; log has NO "copied into a render target" line - HDFOLLOW never fired
+  (the picture's draw target is not a same-size texture with the shader bind flag, or the movie samples a copy of it).
+- Loading time (JJ: "taking a bit longer, three screens instead of two"): LIVE both runs today show the same three pictures
+  (Synopsis 9, 8, 10; the third at +6 s): 01:10 run 21.3 s, 01:29 run 19.7 s (after the change). Not the mod; the pictures
+  change every ~6 s, so a load over ~12 s shows a third one.
+- T4 FAIL (JJ): glow still displaced; fixed only with the HUD group moves off. Log: no "picture piece" line for it.
+  framedump 173004_q0 re-read with each piece's anchor: the LEVEL UP bar is all group 1 except ONE piece - a Draw of 42
+  points (4x4 solid texture), anchor -0.543,0.600 = group 0, drawn between the chevrons (03461, group 1) and the letters
+  (03467, group 1). Not a picture piece -> PICZONE could not see it.
+- huddump 01:32:46 caught a 17-piece frame (menu / pause, no LEVEL UP).
+### LOADFIX2 BUILD 2026-10-11 01:36 (STATIC: built clean + deployed; backup backupsatman_city.dll.before-sandwich)
+- SANDWICH (glowzone mode 2, default): a piece between two pieces of one other group takes that group. Replayed on
+  framedump 173004_q0 (99 pieces): exactly one piece moves - 03464 group 0 -> 1 (the glow).
+- HDFOLLOW2: the picture's draw target is followed whatever its bind flags; frame_inspector copy tap (CopyResource /
+  CopySubresourceRegion by the game) carries the HD picture to the copy's destination. Log "[hd] picture WxH (...) drawn
+  into ..." for the first 12 picture draws, "the game copied the HD picture's target ... - followed".
+- LOADAB: automatic A/B on the first 2 slideshow pictures per loading screen (6 per session): 1.5 s after the HD picture is
+  first used the window is saved as shown (<n>_hd.bmp), then one frame with the game's own picture (<n>_game.bmp) ->
+  %LOCALAPPDATA%\Batman_City\captures\loadab_<time>\. `bc hd ab 0|1`. Judge offline: if the two are identical, the HD
+  picture never reaches the screen; if they differ, compare detail.
+- Ceiling note: the room screen gets ~1450 headset pixels across and the game window is 1438 wide, so a 1024 -> 2048
+  picture can gain at most ~1.4x in the headset even when it reaches the screen.
+
+### LOADFIX2 RESULTS 2026-10-11 01:38 (JJ HEADSET + LIVE log + A/B captures loadab_013831)
+- SANDWICH PASS (JJ: "Level up is fixed"). Log showed a few one-off regroupings during HUD fades (a LEVEL UP letter to
+  group 0 once): the draw order shifts while a widget appears, so "the piece after" from last frame was another piece.
+  ALIGNED (built 01:40, deployed, backup before-aligned): the next piece is only used when last frame's pieces k-1 and k
+  match this frame's.
+- HD loading pictures: the picture is drawn STRAIGHT into the game window (1438x1536 format 28 bind 0x20) - no copy;
+  the 1024x512 viewport seen earlier is something else. HDFOLLOW / HDFOLLOW2 were never needed (follow targets 0).
+  The swap worked in every run tonight (2968 swaps by A/B 2). A/B (same frame, HD vs game's own): edge detail inside the
+  picture 6.05 vs 4.13 and 6.75 vs 4.69 = ~46 % more; close-up visibly crisper (suit pattern, grille). Limit is the
+  headset: the room screen gets ~1450 px across and the picture fills ~1250 px of the 1438 window, then the video stream.
+  LOADAB now off by default (`bc hd ab 1`).
+- Slideshow timing: Synopsis10 arrives 6.4 s after the first picture in all three runs tonight (01:10, 01:29, 01:38),
+  loads 21.3 / 19.7 / 19.7 s -> three pictures. The mod does not touch the slideshow timing; no vanilla baseline measured.
+
+## TEST PLAN LOADTIME (JJ 2026-10-11 01:4x: "still seeing three loading screens ... maybe the screens are just showing for
+less time than the original" - "worth a test")
+Looked up: LOADFIX2 RESULTS above (HD-on loads tonight 21.3 / 19.7 / 19.7 s, picture change every 6.4 s); memory
+ak-first-run-stutter-hdd (game drives on E: = disk cache makes repeat loads faster - keep both loads warm).
+One launch, same save, both loads warm (the game ran 3 times tonight). Measured from the log: "full-screen movie STARTED"
+-> "ended" (load length) and the time between "slideshow picture" lines (picture length).
+| # | command / switch | what it proves | how to judge |
+|---|---|---|---|
+| L1 | at the main menu: `bc hd off` + `bc hd dump 0`, then Continue | load + picture timing with the mod's HD work fully off (no swaps, no read-backs) | log times vs tonight's 19.7 s / 6.4 s |
+| L2 | pause -> quit to main menu, `bc hd on` + `bc hd dump 1`, Continue | control in the same launch | same numbers = the HD pictures change nothing |
+Trigger check: `bc hd status` after each switch (swaps count frozen in L1, rising in L2).
+Follow-up: L1 clearly shorter -> per-picture first-use cost (PNG decode 30-100 ms, fingerprint read-back) is the suspect:
+time each step in the log; equal -> the game's own pacing (no change needed).
+### LOADTIME BUILD 2026-10-11 01:45 (JJ: "just make a button for me"; built clean + deployed, backup before-loadtime)
+- Panel MENUS AND SCREENS: checkbox "HD loading pictures (AI-upscaled)" (off = no swaps and no read-backs; saved as
+  hd_screens=) and under it the last 6 loading-screen lengths with HD on / off (logo video excluded). Log "[hd] loading
+  screen took N s (HD pictures on|off)". JJ runs L1 / L2 himself from the panel; the command steps above are not needed.
+### LOADTIME RESULTS 2026-10-11 ~01:50 (JJ HEADSET, panel switch): HD on and off took the SAME time -> the HD pictures
+are not the cause. JJ: two loading pictures "up until today", three since. STATIC: JJ's high-resolution texture pack
+rewrote BmGame\CookedPCConsole\*.upk + CompressionNoAlpha.tfc (860 MB) on 2026-10-10 17:19, the same day - more texture
+data read from disk per load = longer loads = a third slideshow picture (6.4 s each). Not the mod; nothing to fix here.
+
+## TEST PLAN HEADCAM (JJ 2026-10-11 ~01:50: first person - "we need the camera attached to the head ... when flying the head
+comes forward and it goes through the camera ... attached at a fixed distance from the head"; and "when you move your
+head ... he would also move his body a little bit ... it would work both ways")
+Looked up: playbook @ b955f224 CAM-001 (head pose once), 12-torso-calculations "Body-heading evidence ladder" (HMD yaw is
+not body yaw; thresholded, filtered latent heading), 01-camera-and-tracking (axis-follow body-follow disabled after
+oscillation / body lag), FAIL-HAND-047 / FAIL-HAND-002 (bone writes from a camera hook are overwritten by the skeleton
+evaluation), CAM-013 / FAIL-CAM-020 (head animation vs body); vrframework guide 13 -> REFramework FirstPerson.cpp (head
+joint + smoothing, RotateBody); MELE VR ME2 convo_fp.cpp (head bone only inside a box around the steady eye point, EMA
+smoothing, "a head bone bobs"), ME1 head_aim / SetOwnerNoSee + HideBoneByName; BS Infinite VR bones.h / hide.cpp (UE3
+32-bit: SpaceBases = 32-byte FBoneAtoms, SetOwnerNoSee hides, HideBoneByName does not cascade); own memory
+batman-city-first-person (steady eye point chosen 2026-10-09 because head-bone cameras bob - JJ now asks for the head).
+Static RE (re/BatmanAC.exe.unpacked.exe, ac.py): USkeletalMeshComponent::GetBoneLocation 0x850EE0 (thiscall out, FName,
+space; ret 0x10; zero vector if the bone is missing); hard-coded FName 0x620 = "Bip01_Head" (0x61F Bip01_Neck1, name
+table 0x47C5C1); the game calls it on pawn +0x36C (0xD505B7) = Pawn.Mesh; SkeletalMeshComponent vtable 0x13158C8,
+size 0x6C0, SkeletalMesh +0x1A0. Natives also found: execGetBoneMatrix 0x84EF50, execHideBoneByName 0x84C770,
+execSetOwnerNoSee 0x58F3E0, execGetSocketWorldLocationAndRotation 0x84FB30.
+Stage 1 HEADCAM (built): eye point = steady eye point + smoothed (head bone - steady eye point), capped at 140 UU per
+axis (outside = steady eye point, logged); smoothing in real seconds (both eye passes of a frame get the same point);
+fp_forward / fp_up still apply on top. Panel FIRST PERSON: "camera follows his head (gliding, animations)" (default on)
++ "head smoothing (s)" (default 0.08) + head-frame / fallback counters. Settings fp_head / fp_head_smooth;
+`bc fp head 0|1`, `bc fp smooth N`.
+| # | switch | what it proves | how to judge |
+|---|---|---|---|
+| H1 | first person on, stand still | the bone is found | log "[bc] first person head: mesh ... vtable 13158C8? Bip01_Head - eye point = ..." (~0 to 15 UU); panel fallbacks 0 |
+| H2 | glide / dive | the camera moves with the head | JJ: head no longer passes through the view |
+| H3 | run, fight | bob | JJ: steady enough? raise "head smoothing" if bouncy |
+| H4 | "camera follows his head" off / on | A/B in the panel | JJ |
+Follow-ups: vtable not 13158C8 but the bone found = a subclass (fine); "no Bip01_Head" = the bone name differs -> list
+the mesh's bones (execGetBoneNames 0x858950); camera too high / low or inside the cowl -> the up / forward sliders.
+Stage 2 BODYFOLLOW (plan only, after H1-H4): the body / head of Batman following the player's head. The playbook warns
+(body-follow disabled after oscillation and body lag; bone writes must happen inside the skeleton update). Candidates:
+(a) Batman's facing turns toward the headset's heading when it stays past a dead zone (thresholded, filtered - the
+evidence-ladder rule), standing still only; (b) a small spine / neck lean toward the head's sideways offset, written
+inside the skeleton update (hook after the animation pose, before SpaceBases are used) - needs the SpaceBases layout
+(BS Infinite: 32-byte atoms; check live). Also open: hiding his head (SetOwnerNoSee 0x58F3E0 needs a ProcessEvent call or
+the bOwnerNoSee bit).
+### HEADCAM BUILD 2026-10-11 01:56 (STATIC: built clean + deployed; backup backups\batman_city.dll.before-headcam; not run)
+### STEREOSECTION 2026-10-11 02:18 (JJ: copy Arkham Knight's own STEREO RENDERING section; built + deployed, backup
+before-stereosection): panel section STEREO RENDERING (open the first time, above VIEW) holds 3D rendering Native / AFW +
+warp from + status, as akvr/src/hooks.cpp; removed from FRAME RATE. Not seen by JJ yet.
+### PACKAGE 0.1.1 2026-10-11 02:2x (JJ: "package up this new build"; NOT published)
+- dist/BatmanCityVR-ArkhamCity.zip (115 files, 290.8 MB, sha256 84fbebfac09e15fb...); 0.1 kept as
+  dist/BatmanCityVR-ArkhamCity-v0.1.0.zip. Against 0.1 only batman_city.dll and files/settings.ini differ; testzip clean,
+  no backslash entries, Windows tar lists it.
+- Settings = JJ's live file except first_person=0 (make_package SHIP_OVERRIDES: new players start in third person);
+  new keys hd_screens=1, fp_head=1, fp_head_smooth=0.08.
+- DLL: loading-picture saver (hd dump) now OFF by default (was on = a test tool writing PNGs for every player); the panel
+  switch no longer turns it on. Contains HEADCAM + STEREOSECTION, which JJ has not run yet (build 02:20).
+- PACKAGING_GUIDE section 9: unrun builds go into a release only for JJ's own test - the repo is PUBLIC, so publishing
+  waits for one launch (HEADCAM H1-H4, panel STEREO RENDERING) or JJ's explicit go.
+### FPGATE 2026-10-11 02:25 (JJ 02:24: "no 3D geometry is showing on the main menu anymore"; "first person must always be
+disabled when going into main menu ... or any other loading screen and menus"). LIVE log 02:23: first person on (JJ's
+setting) took the main menu's stand-in pawn (eye -3632, 864, -80; no mesh) and moved the camera away from the menu scene
+- an old first-person bug, not HEADCAM. Fix: first person applies only in gameplay - not on the title screen / main menu
+(room_overlay::title_screen_now), movies / loading screens, menus (game clock stopped or the pause screen), or while the
+game camera is more than 12 m from his eyes. Log "[bc] first person paused: <why>" / "active again". The setting stays
+on: gameplay comes back in first person. Note: the clock signal can lag the menu by seconds (PAUSEHALO run 32) - map /
+upgrade screens may start in first person for a moment. Built + deployed (backup before-fpgate); package rebuilt.
+### MENUBATMAN 2026-10-11 02:3x (JJ: after quitting to the main menu "the HUD elements appear, and you can see the moon, but
+it takes ages for Batman to then come into view"). LIVE log 02:28:53-57: quit, bat wipe replay, menu up at 57.4; first
+person already off (02:28:46, not FPGATE); MENUFADESKIP only drops the faint (~35 alpha) menu fade-in for 2 s - not a
+cover. Suspect: the main-menu scene streams Batman in after the menu shows, slower since JJ's texture pack (10-10 17:19;
+no such report in the many exit tests before it). DISKREAD (built + deployed 02:31, backup before-diskread, not in the
+package): 1 Hz log "[bc] disk: game reading N MB/s (loading for S s so far)" while > 20 MB/s, then "finished reading
+after S s". Test: quit to the main menu once, JJ says roughly when Batman appears; reading run ~ that long = loading
+(texture pack); no reading = something else (then capture right after the menu appears).
+- LOADHOLD (JJ: "if it's a loading issue ... maybe it should pause longer at the black screen after the bat wipe";
+  built + deployed 03:14, backup before-loadhold, not run, not in the package): gfx_hud samples the game's disk reads
+  every 0.1 s during a wipe replay; at the replay's end, a replay that ends on black (not flipped) keeps its black last
+  frame while reading > 20 MB/s over the last 0.5 s, max 20 s. No reading = the wipe ends exactly as before (menu-open
+  wipes unaffected). Log "LOADHOLD: the game is loading (N MB/s) - black held" / "black held N ms ... (N MB read)".
+  Command: bc wipehold 0|1. Judge: quit to the main menu - black until Batman is there, then the menu appears with him.
+- LOADHOLD RESULT 03:15 (JJ HEADSET + LIVE log): quit to the main menu -> "LOADHOLD: the game is loading (126 MB/s)" ->
+  "black held 1375 ms (40 MB read)" -> menu. Reading went on at 21-25 MB/s for ~4 s more (0.5 s window dipped under 20).
+  JJ: works (bats, black, wait, menu) but the menu "just appears" - wants the bat transition into the menu.
+- WIPEREVEAL (built + deployed 03:18, backup before-wipereveal, not run): a replay that ended on black in the menus (not
+  opened from gameplay, not quitting the game, recording > 8 frames) plays again FLIPPED (black bats clearing off the
+  arriving screen, as after the logos); HUD pieces stay hidden while it plays. LOADHOLD now ends below 12 MB/s (starts
+  above 20). Log "WIPEREVEAL: black -> bats clearing off the arriving screen". Command: bc wipereveal 0|1.
+  Watch: other menu-to-menu wipes that end on black now also reveal (save select -> title).
+- SCREEN25 2026-10-11 03:58 (JJ: "move the loading screens a bit further away"): room screen 1.75 -> 2.50 m, size kept
+  2.4 m wide (now ~51 deg instead of ~69 deg). JJ's settings.ini edited (backup settings.ini.before-screen25) + code
+  default g_screenDistM 2.5 (built + deployed, backup before-screen25). Same screen = logos and movies too. Panel MENUS
+  AND SCREENS sliders still adjust both.
+
+## TEST PLAN MENUARRIVE (JJ 2026-10-11 04:0x: the reveal after quitting "sometimes arrives at Batman, and sometimes it
+arrives before Batman. Can we time it better so that it syncs up with his arrival")
+Looked up: LOADHOLD / WIPEREVEAL above (disk reading = proxy only: log 04:01 hold ended 42.2 s, reading in bursts to 46.8 s);
+framedump 173004 vs constant-buffer sizes (scene draws 160/320/640 bytes - no bone-palette signature visible, so no
+'skinned draw' marker from old data); memory ak-first-run-stutter-hdd (load times vary with the disk cache - explains
+'sometimes').
+Causes: (1) Batman's mesh / textures stream in after the frontend map is up, later than the disk proxy says; (2) the
+menu's own intro (Batman placed / faded in by the frontend script) at a fixed time after the menu opens.
+MENUTRACE (built + deployed 04:04, backup before-menutrace, test build only): first 3 wipes to black in the menus per
+session, 14 s each: [trace] lines every 0.1 s (draw calls per present min / avg / max, disk MB/s, black / REVEAL / menu
+shown, LOADHOLD) + the game's own frame every 0.5 s (under our black) -> captures\menutrace_<time>\<n>_<ms>.bmp.
+| # | step | what it proves | how to judge |
+|---|---|---|---|
+| A1 | quit to the main menu 3 times (pause -> quit) | when Batman appears vs draws / disk | first frame with Batman; the draw-count step at that moment; disk then |
+| A2 | JJ: each exit, early or on time | ties the frames to what he saw | |
+Next: draw count steps up when Batman appears -> release the hold on that step (with the disk rule as fallback and the
+20 s cap); no step -> look at the frames for another sign (e.g. a picture change in the region where he stands).
+### MENUARRIVE RESULTS 2026-10-11 04:06-04:07 (LIVE trace + frames, 3 quits) and fix
+- Draw calls per present: wipe (old level) 755-820; frontend's first shot (moon close-up) ~95 from ~1.5 s; Batman's
+  shot (gargoyle, bats, city) ~290 from +4.9 / +4.2 / +4.0 s (frames 2_04000 moon, 2_04500 Batman). The disk hold had
+  released at 3.1 / 2.1 / 2.0 s = reveal before Batman each time. Drop to ~12 at +7-8 s = JJ pressing Continue.
+- Fix (built + deployed 04:09, backup before-menuarrive): LOADHOLD now holds until Batman's shot: B = most draws during
+  the wipe, low phase < 0.5 B (avg L), release after 3 presents >= max(1.8 L, L + 80); fallbacks: no low phase + disk quiet
+  1 s; 15 s cap. Replayed on the 3 traces: releases at 4938 / 4312 / 4000 ms = the jump each time. MENUTRACE default off;
+  its 716 MB of frames deleted.
+- JJ 04:11 (HEADSET): reveal "a tiny bit too late", and no bat sound with it ("there should be"). LIVE log 04:11:37: the first
+  draw sample after a gap counted every draw since the last replay ("923821 during the wipe") -> low-phase average 162 ->
+  Batman's shot (~290) was under the 1.8 x threshold; released only at 353 draws = late.
+- MENUARRIVE2 + WIPESOUND (built + deployed 04:15, backup before-wipesound, not run): draw samples > 200 ms apart count 0.
+  Sound: URGFxMovie execPlaySound 0xC29A70 -> vtable +0x1B8 = 0xE8F090 (all RGFxMovie classes; thiscall const FString&,
+  ret 4; GEngine -> 0x689A10 -> vtable +0x198), prologue 8B 0D 00 18 66 01 E8 checked on the unpacked exe. Hooked: logs
+  every menu sound name (first 60), learns the one played within 0.7 s before / 0.4 s after a wipe to black starts
+  (gfx_hud wipe event 0), plays that name on the game thread (next CalcSceneView) when the reveal starts (event 1).
+  Commands: bc wipesound 0|1, bc wipesound play. If the bat sound is not a menu-movie sound, the log lists what is played
+  instead ("no wipe sound heard yet").
+- JJ 04:16 (HEADSET): no sound; the menu's audio started before the reveal. LIVE: no menu sound logged at all (the
+  RGFxMovie PlaySound path is unused); low phase 162 again - Batman's shot (~290) is also < 0.5 x wipe level (820), so it
+  fed the low average and lifted the bar above itself (released at 352).
+- MENUARRIVE3 + WIPESOUND2 (built + deployed 04:19, backup before-wwise, not run): once the low phase is known only
+  presents under the bar update it, and it starts from the smallest low value. Sound: Wwise is linked into the exe and
+  EXPORTED - AK::SoundEngine::PostEvent(id, gameObject, flags, cb, cookie, n, ext) 0x1057640 (prologue 83 EC 10 53 57 8B
+  7C 24 30 checked; name versions 0x1056D40 / 0x1056CB0). Hooked: events near a wipe start (0.7 s before .. 0.4 s after)
+  that are not also posted on their own (clicks, music) = the wipe's sound; the reveal posts it on the newest event's
+  game object (game thread). Log: "Wwise event N on object M (at the wipe start)" (first 80 near wipes), "WIPESOUND: the
+  wipe's sound = Wwise event N", "posted with the reveal ... playing id" (0 = refused).
+- JJ 04:21 (HEADSET): menu audio starts while still black; our bats silent; Batman already there = a little late. LIVE:
+  no Wwise event within -0.7 / +0.4 s of the wipe start; menu events from +1.1 s (clock running 02.38 = the menu audio).
+  Low phase 94 now right; release at the 3rd high present.
+- WIPESOUND3 (built + deployed 04:23, backup before-wwise2, not run): the name versions of PostEvent (0x1056D40 / 0x1056CB0)
+  never call the id version - all three end in 0x1056BD0 (cdecl id, object, flags, cb, cookie, externals; prologue 83 EC
+  30 B8 01 00 00 00 56), hooked there. At each wipe start the events of the last 1.5 s are logged; learning window
+  -1.5 / +0.6 s. Release on the FIRST present of Batman's shot; reveal starts 300 ms into the recording (bc wipereveal
+  skip N, 0-900).
+- JJ 04:25 (HEADSET): bats still too late, still silent. LIVE 04:25:08.791: at the quit wipe's start the game posted
+  990593514 + 3809399880 (15 ms before) and 3904589100 (0 ms); before them alternating 172321384 / 2563718726 = pause-menu
+  clicks. The not-common rule dropped the bat sound because it plays at EVERY game wipe (pause too).
+- WIPESOUND4: gfx_hud wipe event 2 at every 'wipe starts'; each Wwise event within 60 ms of a wipe start scores one point
+  per wipe; the bat sound = most wipe starts (ties: nearest). Command: bc wipesound id N (force), bc wipesound play.
+- JJ chose (AskUserQuestion): reveal 'just before Batman' (bats already flying as his shot appears; the end of the moon
+  shot may show). PREREVEAL: in the low phase the reveal starts 500 ms after the disk goes quiet (< 12 MB/s); traces: quiet
+  1-2 s before the cut. Batman's shot first = immediate as before. Reveal skip back to 0. Commands: bc wipereveal pre N.
+  Built + deployed 04:3x (backups before-wipesound4, before-prereveal), not run.
+### PACKAGE 0.1.2 2026-10-11 04:3x (JJ: "package it up removing any tests and probes ... all the settings saved and installed
+and then removed when uninstalled"; NOT published)
+- LIVE 04:29-04:30 (JJ's run of the 04:28 build): bat sound learned = Wwise event 3904589100 (0 ms from the wipe start),
+  posted with the reveal on object 7 -> playing id 152 (accepted); PREREVEAL released 'loading finished - just before
+  Batman's shot'. BUG found: wipe_event(2) had been inserted as the body of a one-line if -> 'wipe starts' logged for
+  every wipe piece every frame (358k log lines) and scoring capped at 60 wipes. Fixed with braces.
+- Removed test code: HDFOLLOW / HDFOLLOW2 + the frame_inspector copy tap (never needed), LOADAB, LOADTIME readout, DISKREAD,
+  MENUTRACE, the Wwise per-event logging and 1.5 s dumps. A slip in that cut (a duplicated 'else if (kind == 2)' that
+  made scoring dead code) was caught by reading the result. Head-camera counters now behind 'show test options'.
+- Install: first install also copies launch.ini (2480x2648, JJ's DLSS output size) and menu_wipe.bin (the recorded bat
+  transition every reveal replays - a fresh install had none until a game was started from the main menu). Uninstall:
+  always deletes %LOCALAPPDATA%\Batman_City (settings, launch.ini, recording, logs, captures); -KeepSettings keeps it,
+  -KeepShortcuts for practice runs. README removal text says so.
+- Practice run (scratchpad, LOCALAPPDATA redirected, copies of JJ's configs): install -> 3 data files; second install
+  keeps a changed setting; uninstall from the game folder -> data folder gone, backup gone, BmEngine / UserEngine /
+  DefaultEngine byte-identical to before. JJ's real files untouched (hash checked).
+- dist/BatmanCityVR-ArkhamCity.zip 117 files, 292.4 MB, sha256 ea1482ae91f0c786... (changed vs 0.1: dll, both scripts,
+  README, settings; new: launch.ini, menu_wipe.bin). Clean build (04:34) not yet run in the game.
+- README (GitHub page + zip): download step now explains the size - upscaled loading pictures ~225 MB (87 at 2x), DLSS
+  library ~60 MB, the mod a few MB (measured from the zip: 223.5 / 59.1 / 5.6 MB). Package rebuilt with it.
+- README images (JJ: "the image ... sucks"): replaced images/stereo_gcr*.jpg (dark wall, Batman's back, HUD prompt) with
+  images/rooftop_hero.jpg (left eye of capture 20261010_173004, 16:9 crop 2480x1395 from y 20, 1600x900: helicopter +
+  searchlight, Joker balloons, Ferris wheel, cape) at the top and images/rooftop_stereo.jpg (both eyes, y 150-2350,
+  800 px each) under 'Native stereo 3D'. Grade: gamma 0.82 lift, contrast 1.06, light unsharp after the downscale -
+  nothing added. Package rebuilt (sha256 dd778c8e...). Not pushed.
+- GitHub page (JJ: the top image should be the game's marketing image): copying WB's Steam library art into the repo was
+  refused by the permission check (republishing WB art); JJ chose 'use Steam's'. README top = <img> of Steam's
+  capsule_616x353.jpg straight from cdn.cloudflare.steamstatic.com (not in the repo) + credit line. Pushed: 544dbd6
+  (rooftop images, size note), 1a17f22 (Steam artwork). The working README keeps the 0.1.2 removal text (pushed copies
+  say the 0.1 text until the release).

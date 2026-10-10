@@ -148,7 +148,7 @@ EdgeViewSnapshot g_edgeSnap;
 
 // Controls (overlay writes, render thread reads).
 std::atomic<bool> g_enabled{true};        // kill switch: tears the session down
-std::atomic<float> g_screenDistM{1.75f};  // quad distance in meters
+std::atomic<float> g_screenDistM{2.5f};   // quad distance in meters (JJ 2026-10-11: "a bit further away", was 1.75)
 std::atomic<float> g_screenWidthM{2.4f};  // quad width in meters
 std::atomic<bool> g_cameraMode{false};    // M3: drive the game camera from the HMD
 

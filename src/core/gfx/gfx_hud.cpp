@@ -622,6 +622,114 @@ std::atomic<bool> g_replayHidesAll{true};     // WIPEMAIN2: no HUD piece drawn w
 // rest went to the panel. Now a hidden piece clears the panel once per frame, and the replay holds its last frame while
 // untextured wipe pieces keep coming (300 ms after the last, at most 4 s from the start).
 ULONGLONG g_hideAllUntil = 0, g_hideAllCap = 0;
+
+// LOADHOLD (JJ 2026-10-11: after quitting to the main menu "it takes ages for Batman to then come into view" - "if it's a
+// loading issue because there's more data to load, then maybe it should pause longer at the black screen after the bat
+// wipe"): a wipe replay that ends on black (not the flipped ones that reveal a menu) keeps its black last frame while the
+// game reads from disk faster than 20 MB/s (measured over the last 0.5 s, sampled every 0.1 s during the replay, so a
+// wipe with no loading behind it ends exactly as before), at most 20 s. `bc wipehold 0|1`.
+std::atomic<bool> g_loadHoldOn{true};
+struct DiskSample { ULONGLONG ms; uint64_t bytes; };
+DiskSample g_disk[16] = {};
+int g_diskN = 0;
+ULONGLONG g_lhStart = 0;
+uint64_t g_lhStartBytes = 0;
+void disk_sample(ULONGLONG now) {
+    if (g_diskN && now - g_disk[(g_diskN - 1) & 15].ms < 100) return;
+    IO_COUNTERS io{};
+    if (!GetProcessIoCounters(GetCurrentProcess(), &io)) return;
+    g_disk[g_diskN & 15] = DiskSample{now, io.ReadTransferCount};
+    ++g_diskN;
+}
+float disk_rate_mbs(ULONGLONG now) { // over the last ~0.5 s; 0 = not enough samples
+    if (g_diskN < 2) return 0.0f;
+    const DiskSample& last = g_disk[(g_diskN - 1) & 15];
+    int i = g_diskN - 2;
+    while (i > 0 && i > g_diskN - 16 && now - g_disk[i & 15].ms < 500) --i;
+    const DiskSample& first = g_disk[i & 15];
+    if (last.ms <= first.ms || last.bytes < first.bytes) return 0.0f;
+    return float(double(last.bytes - first.bytes) / 1e6 / (double(last.ms - first.ms) / 1000.0));
+}
+// MENUARRIVE (JJ 2026-10-11: the reveal "sometimes arrives at Batman, and sometimes it arrives before Batman"). MENUTRACE
+// 04:06-04:07, 3 quits to the main menu (draw calls per present + the game's frame every 0.5 s): during the wipe the
+// old level draws ~720-800; at ~1.5 s the frontend's first shot (a close-up of the moon) draws ~95; Batman's shot (on
+// the gargoyle, bats, the city) jumps to ~290 at +4.2 / +4.9 s - frames 2_04000 (moon) / 2_04500 (Batman). The disk
+// hold had ended 0.7-2 s before that. So the black now holds until that jump: the level during the wipe (B), then a low
+// phase (< 0.5 B, its average L), then 3 presents at >= max(1.8 L, L + 80) = Batman's shot -> reveal. Fallbacks: no low
+// phase and the disk quiet for 1 s = nothing loading after all; 15 s cap.
+uint64_t g_dsLastCensus = 0;
+ULONGLONG g_dsLastMs = 0;     // MENUARRIVE2: a sample after a gap is not one present (log 04:11: "923821 during the wipe")
+ULONGLONG g_dsReplay = 0;     // the replay the counts belong to (its start time)
+uint32_t g_dsWipeMax = 0;     // B: the most draws per present during the wipe
+uint32_t g_dsLast = 0;        // draws in the last present
+void draw_sample() { // every present while a replay plays
+    const uint64_t c = bvr::frame_inspector::draw_call_census();
+    const ULONGLONG ms = GetTickCount64();
+    g_dsLast = g_dsLastCensus && c >= g_dsLastCensus && ms - g_dsLastMs < 200 ? uint32_t(c - g_dsLastCensus) : 0;
+    g_dsLastCensus = c;
+    g_dsLastMs = ms;
+    if (g_dsReplay != g_replayStart) { g_dsReplay = g_replayStart; g_dsWipeMax = 0; }
+    if (!g_lhStart && g_dsLast > g_dsWipeMax) g_dsWipeMax = g_dsLast;
+}
+bool g_lhLowSeen = false;
+int g_lhLowN = 0, g_lhHighN = 0;
+float g_lhLowAvg = 0.0f;
+ULONGLONG g_lhQuietSince = 0;
+std::atomic<int> g_preRevealMs{500}; // PREREVEAL, below
+bool load_hold(ULONGLONG now, bool toBlack, ULONGLONG recLen) {
+    (void)recLen;
+    if (!toBlack || !g_loadHoldOn.load(std::memory_order_relaxed)) return false;
+    disk_sample(now);
+    const float rate = disk_rate_mbs(now);
+    const uint64_t bytes = g_diskN ? g_disk[(g_diskN - 1) & 15].bytes : 0;
+    const uint32_t d = g_dsLast;
+    if (!g_lhStart) {
+        if (rate < 20.0f) return false; // nothing loading: the wipe ends as before
+        g_lhStart = now;
+        g_lhStartBytes = bytes;
+        g_lhLowSeen = false; g_lhLowN = 0; g_lhHighN = 0; g_lhLowAvg = 0.0f; g_lhQuietSince = 0;
+        BVR_LOG("gfx_hud: LOADHOLD: the game is loading (%.0f MB/s, %u draws per present, %u during the wipe) - black held "
+                "until Batman's shot", rate, d, g_dsWipeMax);
+        return true;
+    }
+    const char* end = nullptr;
+    const float B = float(g_dsWipeMax);
+    // MENUARRIVE3 (log 04:16:50: low phase 162, released at 352): Batman's shot (~290) is also under half the wipe's
+    // level, so it fed the low-phase average and lifted the bar above itself. Once the low phase is known, only presents
+    // under the bar update it; the first low presents start it from their smallest value.
+    const float need = g_lhLowAvg * 1.8f > g_lhLowAvg + 80.0f ? g_lhLowAvg * 1.8f : g_lhLowAvg + 80.0f;
+    if (g_lhLowSeen && float(d) >= need) {
+        if (++g_lhHighN >= 1) end = "Batman's shot is up"; // JJ 04:21: "a little bit late" - the first present
+    } else if (d && d < 0.5f * B) { // the low phase: the frontend's first shot (a close-up of the moon)
+        g_lhHighN = 0;
+        if (++g_lhLowN >= 3) g_lhLowSeen = true;
+        g_lhLowAvg = g_lhLowAvg > 0.0f ? (float(d) < g_lhLowAvg ? float(d) : g_lhLowAvg * 0.9f + float(d) * 0.1f) : float(d);
+    } else {
+        g_lhHighN = 0;
+    }
+    if (rate < 12.0f) { if (!g_lhQuietSince) g_lhQuietSince = now; }
+    else g_lhQuietSince = 0;
+    if (!g_lhLowSeen) {
+        if (g_lhQuietSince && now - g_lhQuietSince > 1000) end = "nothing more loading";
+    } else if (!end && g_lhQuietSince && now - g_lhQuietSince >= ULONGLONG(g_preRevealMs.load(std::memory_order_relaxed))) {
+        // PREREVEAL (JJ 2026-10-11, asked: the bats "just before Batman"): the cut to Batman's shot comes 1-2 s after the
+        // loading goes quiet (traces 04:06: quiet ~3.5 / 3.3 s, cut 4.9 / 4.3 s; 04:25: quiet ~12.0, cut 14.1) - the reveal
+        // starts g_preRevealMs after it, so the bats are already flying when he appears (the moon shot's end may show).
+        end = "loading finished - just before Batman's shot";
+    }
+    if (!end && now - g_lhStart > 15000) end = "15 s cap reached";
+    if (!end) return true;
+    BVR_LOG("gfx_hud: LOADHOLD: black held %llu ms - %s (draws %u, low phase %.0f, wipe %u; %.0f MB read)", now - g_lhStart,
+            end, d, g_lhLowAvg, g_dsWipeMax, double(bytes - g_lhStartBytes) / 1e6);
+    g_lhStart = 0;
+    return false;
+}
+// WIPESOUND: the adapter hears when a wipe to black starts (0) and when the reveal starts (1).
+std::atomic<WipeEventFn> g_wipeEventFn{nullptr};
+void wipe_event(int kind) { if (WipeEventFn f = g_wipeEventFn.load(std::memory_order_relaxed)) f(kind); }
+bool reveal_after_black(ULONGLONG now); // WIPEREVEAL, after start_exit_replay
+std::atomic<bool> g_revealOn{true};
+std::atomic<int> g_revealSkipMs{0}; // JJ chose the bats before Batman (PREREVEAL): the full recording again
 // BLACKFILL (JJ 2026-10-09 23:45: at game start "a zoomed view of the moon ... that should be black. And then the bats
 // come across it and reveal Batman sitting on the gargoyle"). Ring 232042: after the logo movie the game covers its HUD
 // stage with untextured fills at the stage's own scale (0x0, placement 1.9e-4, ~2.4 s) = a full-screen black in 2D;
@@ -878,12 +986,34 @@ int g_pasteZoneCur[kPasteMax], g_pasteZonePrev[kPasteMax];
 int g_pastePending[kPasteMax];
 int g_pasteIdx = 0, g_pastePendingN = 0;
 bool g_pasteInit = false;
-std::atomic<bool> g_glowZoneOn{true};
+// PICZONE (JJ 2026-10-11: the glow under "LEVEL UP" still sits below it, GLOWZONE did not catch it): capture 173005 fits
+// the glow exactly to the LEVEL UP text moved by the top-left group (0.9x toward the corner, 0.1 down) while the text
+// is top centre - the glow is an ordinary picture piece whose ANCHOR lies in the top-left zone while its picture lies
+// under the text. A picture piece carries its texture mapping in the vertex constants (floats 16..31, laid out like the
+// placement: framedump 173004, a 1024x256 picture has v scale 0.0002 = 1 / (256 px * 20 twips)), so the middle of its
+// picture (uv 0.5, 0.5) can be put on screen. glowzone mode: 0 off; 1 render-target pastes only (GLOWZONE); 2 + a picture
+// piece goes to the zone of its picture's middle when the next piece (same order, last HUD frame) agrees (default);
+// 3 + the picture's middle alone; 4 + a piece unlike both neighbours takes the next piece's zone.
+constexpr int kPieceMax = 512;
+int g_anchorCur[kPieceMax], g_anchorPrev[kPieceMax]; // anchor zone of the k-th ordinary piece, this / last HUD frame
+int g_pieceIdx = 0, g_prevAnchor = -1;
+std::atomic<int> g_glowZoneMode{2};
+std::atomic<uint32_t> g_picZoneMoved{0};
+struct PicSeen { unsigned w, h; int fmt, from, to; bool moved; };
+PicSeen g_picSeen[32];
+int g_picSeenN = 0;
 void paste_frame_end() {
-    if (!g_pasteInit) { for (int i = 0; i < kPasteMax; ++i) g_pasteZoneCur[i] = g_pasteZonePrev[i] = -1; g_pasteInit = true; }
+    if (!g_pasteInit) {
+        for (int i = 0; i < kPasteMax; ++i) g_pasteZoneCur[i] = g_pasteZonePrev[i] = -1;
+        for (int i = 0; i < kPieceMax; ++i) g_anchorCur[i] = g_anchorPrev[i] = -1;
+        g_pasteInit = true;
+    }
     for (int i = 0; i < kPasteMax; ++i) { g_pasteZonePrev[i] = g_pasteZoneCur[i]; g_pasteZoneCur[i] = -1; }
     g_pasteIdx = 0;
     g_pastePendingN = 0;
+    for (int i = 0; i < kPieceMax; ++i) { g_anchorPrev[i] = g_anchorCur[i]; g_anchorCur[i] = -1; }
+    g_pieceIdx = 0;
+    g_prevAnchor = -1;
 }
 
 int zone_of(float x, float y) {
@@ -892,6 +1022,19 @@ int zone_of(float x, float y) {
     if (x < -0.3f) return 4;
     if (y < -0.45f) return 5;
     return 6;
+}
+
+// The zone of the middle of this piece's picture, or -1 (no usable texture mapping / off screen).
+int picture_zone(const float* m, unsigned lenBytes, float& cx, float& cy) {
+    if (lenBytes < 128) return -1;
+    const float a = m[16], b = m[17], c = m[20], d = m[21], det = a * d - b * c;
+    if (!(fabsf(det) > 1e-14f) || m[31] != 1.0f) return -1;
+    const float r0 = 0.5f - m[28], r1 = 0.5f - m[29];
+    const float x = (r0 * d - r1 * c) / det, y = (r1 * a - r0 * b) / det; // local point of uv (0.5, 0.5)
+    cx = x * m[0] + y * m[4] + m[12];
+    cy = x * m[1] + y * m[5] + m[13];
+    if (!(fabsf(cx) <= 1.05f && fabsf(cy) <= 1.05f)) return -1;
+    return zone_of(cx, cy);
 }
 
 void zone_adjust(ID3D11DeviceContext* ctx, Decision& d) {
@@ -912,12 +1055,12 @@ void zone_adjust(ID3D11DeviceContext* ctx, Decision& d) {
         ID3D11ShaderResourceView* srv = nullptr;
         ctx->PSGetShaderResources(0, 1, &srv);
         bool rtPaste = false;
+        D3D11_TEXTURE2D_DESC td{};
         if (srv) {
             ID3D11Resource* r = nullptr;
             srv->GetResource(&r);
             ID3D11Texture2D* t = nullptr;
             if (r && SUCCEEDED(r->QueryInterface(IID_PPV_ARGS(&t))) && t) {
-                D3D11_TEXTURE2D_DESC td{};
                 t->GetDesc(&td);
                 rtPaste = (td.BindFlags & D3D11_BIND_RENDER_TARGET) && td.Width < 1000;
                 t->Release();
@@ -925,12 +1068,52 @@ void zone_adjust(ID3D11DeviceContext* ctx, Decision& d) {
             if (r) r->Release();
             srv->Release();
         }
-        if (rtPaste && g_glowZoneOn.load(std::memory_order_relaxed)) {
+        const int mode = g_glowZoneMode.load(std::memory_order_relaxed);
+        if (rtPaste && mode >= 1) {
             const int k = g_pasteIdx++;
             if (k < kPasteMax) g_pastePending[g_pastePendingN < kPasteMax ? g_pastePendingN++ : kPasteMax - 1] = k;
             z = k < kPasteMax ? g_pasteZonePrev[k] : -1;
             if (z < 0) { cb->Release(); return; } // not learned yet: leave it where the game put it
         } else {
+            // PICZONE (modes 2-4, above): the anchor zone is z; neighbours by draw order, the next one from the last frame
+            const int a = z, k = g_pieceIdx++;
+            const int prev = g_prevAnchor;
+            // last frame lined up with this one around piece k (its k-1 and k match): else a widget fading in / out shifted
+            // the order and "the piece after" is another piece (log 01:38: a LEVEL UP letter sent to group 0 once)
+            const bool aligned = k + 1 < kPieceMax && g_anchorPrev[k] == a && (k == 0 || g_anchorPrev[k - 1] == prev);
+            const int next = aligned ? g_anchorPrev[k + 1] : -1;
+            if (k < kPieceMax) g_anchorCur[k] = a;
+            g_prevAnchor = a;
+            if (mode >= 2 && g_pasteInit) {
+                float cx = 0.0f, cy = 0.0f;
+                const bool picture = td.Width >= 64 && td.Height >= 16; // a real picture, not a font page / solid fill
+                const int pz = mode <= 3 && picture ? picture_zone(m, len, cx, cy) : -1;
+                int to = a;
+                // SANDWICH (JJ 2026-10-11 01:3x: PICZONE did not catch it; framedump 173004: the glow is a 42-point shape,
+                // anchor -0.543,0.600 = group 0, drawn between the LEVEL UP chevrons and letters, all group 1): a piece
+                // between two pieces of one other group belongs to that group.
+                if (mode == 2 && prev >= 0 && prev == next && a != prev) to = prev;
+                else if (mode == 2 && pz >= 0 && pz != a && pz == next) to = pz;
+                else if (mode == 3 && pz >= 0 && pz != a) to = pz;
+                else if (mode == 4 && prev >= 0 && next >= 0 && a != prev && a != next) to = next;
+                if (to != a) g_picZoneMoved.fetch_add(1, std::memory_order_relaxed);
+                // log each kind of piece once: regrouped, or its picture's middle in another zone but left alone
+                if ((to != a || (pz >= 0 && pz != a)) && g_picSeenN < 32) {
+                    bool seen = false;
+                    for (int i = 0; i < g_picSeenN; ++i) {
+                        const PicSeen& p = g_picSeen[i];
+                        seen |= p.w == td.Width && p.h == td.Height && p.fmt == int(td.Format) && p.from == a && p.to == pz;
+                    }
+                    if (!seen) {
+                        g_picSeen[g_picSeenN++] = PicSeen{td.Width, td.Height, int(td.Format), a, pz, to != a};
+                        BVR_LOG("gfx_hud: piece %ux%u fmt %d bind 0x%x: anchor %.3f,%.3f = group %d, picture middle "
+                                "%.3f,%.3f = group %d, pieces before / after: group %d / %d -> %s %d (glowzone mode %d)",
+                                td.Width, td.Height, int(td.Format), td.BindFlags, m[12], m[13], a, cx, cy, pz, prev, next,
+                                to != a ? "MOVED to group" : "left in group", to, mode);
+                    }
+                }
+                z = to;
+            }
             for (int i = 0; i < g_pastePendingN; ++i) g_pasteZoneCur[g_pastePending[i]] = z;
             g_pastePendingN = 0;
         }
@@ -1116,9 +1299,12 @@ Decision classify(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
     if (keep && nowMs - g_lastKeepMs > 400 && !mainWipe &&
         !(gameplay && nowMs - g_movieEndMs.load(std::memory_order_relaxed) < 3000))
         g_squareStarts.fetch_add(1, std::memory_order_relaxed);
-    if (keep && nowMs - g_lastKeepMs > 400 && ++s_wipeLogs <= 60)
-        BVR_LOG("gfx_hud: wipe starts (%s, start screen placement %.3g, %s) t%llu", mainWipe ? (g_recKeep ? "main menu -> game: shown (saved copy kept)" : "main menu -> game: shown, recorded") :
-                "square: hidden, replayed", g_menuScale, gameplay ? "gameplay" : "menus", nowMs % 1000000ULL);
+    if (keep && nowMs - g_lastKeepMs > 400) {
+        wipe_event(2); // WIPESOUND4: every bat wipe of the game starts here (its sound plays now)
+        if (++s_wipeLogs <= 60)
+            BVR_LOG("gfx_hud: wipe starts (%s, start screen placement %.3g, %s) t%llu", mainWipe ? (g_recKeep ? "main menu -> game: shown (saved copy kept)" : "main menu -> game: shown, recorded") :
+                    "square: hidden, replayed", g_menuScale, gameplay ? "gameplay" : "menus", nowMs % 1000000ULL);
+    }
     // MENUOPEN3 (JJ 2026-10-10 17:28: "back to the zoomed moon" logos -> first menu; the title was not recognised under a
     // texture pack, so the boot transition counted as gameplay): only after a loading screen (the second full-screen movie: the first is the logos).
     const bool inWorld = g_movieEnds.load(std::memory_order_relaxed) >= 2; // the logos, then a loading screen
@@ -1187,6 +1373,7 @@ Decision classify(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
                 g_replayInvert = g_wipeFlipOn.load(std::memory_order_relaxed) && g_menuScale < 1.0e-3f && !gameplay;
                 g_replayOn.store(true);
                 g_replays.fetch_add(1, std::memory_order_relaxed);
+                if (!g_replayInvert) wipe_event(0); // WIPESOUND: a wipe to black - the game's own bat sound plays now
                 BVR_LOG("gfx_hud: square wipe replaced by the recorded menu wipe (%d frames, %llu ms%s)", g_recCount,
                         g_recTime[g_recCount - 1], g_replayInvert ? ", FLIPPED: black bats over the arriving menu" : "");
             }
@@ -1403,10 +1590,14 @@ void before_eye_capture(ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
         }
         g_recLastMs = now;
     } else if (rtv && replay) {
+        disk_sample(now); // LOADHOLD: the game's disk reading through the wipe
+        draw_sample();    // MENUARRIVE: draw calls per present through the wipe
         const ULONGLONG t = now - g_replayStart;
         int k = 0;
         while (k + 1 < g_recCount && g_recTime[k + 1] <= t) ++k;
-        if (t > g_recTime[g_recCount - 1] + 50 && now >= g_hideAllUntil) { // WIPEMAIN3: last frame held meanwhile
+        if (t > g_recTime[g_recCount - 1] + 50 && now >= g_hideAllUntil &&
+            !load_hold(now, !g_replayInvert, g_recTime[g_recCount - 1]) && // WIPEMAIN3: last frame held meanwhile
+            !reveal_after_black(now)) {
             g_replayOn.store(false);
             BVR_LOG("gfx_hud: wipe replay ended after %llu ms", t);
             g_replayEndMs = now; // MENUFADESKIP
@@ -1479,6 +1670,27 @@ void start_exit_replay(ULONGLONG now, const char* why) {
     g_replays.fetch_add(1, std::memory_order_relaxed);
     BVR_LOG("gfx_hud: leaving the game (%s) - full-view bat wipe to black", why);
 }
+// WIPEREVEAL (JJ 2026-10-11: after quitting to the main menu "bats flying, then it turns black, then it waits, then a menu
+// appears. Instead of just appearing, there should be the bat transition to the menu"): a replay that ended on black in
+// the menus (not opened from gameplay, not quitting the game) plays again FLIPPED - black bats clearing off the arriving
+// screen, as the first menu after the logos does. true = the replay goes on (the reveal started).
+namespace { // the declaration above sits in this file's unnamed namespace
+bool reveal_after_black(ULONGLONG now) {
+    if (g_replayInvert || !g_revealOn.load(std::memory_order_relaxed) || g_wipeFromGameplay || now < g_exitUntil ||
+        g_recCount <= 8)
+        return false;
+    g_replayInvert = true;
+    // JJ 04:21: "Batman's already sitting there, so it's a little bit late": the reveal starts g_revealSkipMs into the
+    // recording, past its nearly-solid black opening frames.
+    g_replayStart = now - ULONGLONG(g_revealSkipMs.load(std::memory_order_relaxed));
+    g_hideAllUntil = now + g_recTime[g_recCount - 1] + 50;
+    g_hideAllCap = now + 4000;
+    BVR_LOG("gfx_hud: WIPEREVEAL: black -> bats clearing off the arriving screen (%llu ms)", g_recTime[g_recCount - 1]);
+    wipe_event(1); // WIPESOUND: the game's bat sound with the reveal
+    return true;
+}
+
+} // namespace
 void exit_hold(bool cond) {
     const ULONGLONG now = GetTickCount64();
     if (now >= g_exitUntil || !cond) return;
@@ -1586,7 +1798,16 @@ void set_hide_wipes(bool on) { g_hideWipes.store(on); BVR_LOG("gfx_hud: menu bat
 bool hide_wipes() { return g_hideWipes.load(); }
 void set_menu_open_hold(int ms) { g_menuOpenHoldMs.store(ms < 0 ? 0 : ms > 4000 ? 4000 : ms); BVR_LOG("gfx_hud: menu opening from gameplay: hold %d ms after the recorded wipe", g_menuOpenHoldMs.load()); }
 void set_open_fade(bool on) { g_openFadeOn.store(on); BVR_LOG("gfx_hud: menu-opening fade pieces %s", on ? "not drawn" : "drawn (test)"); }
-void set_glow_zone(bool on) { g_glowZoneOn.store(on); BVR_LOG("gfx_hud: glow pastes follow their text's group %s", on ? "ON" : "off (anchor)"); }
+void set_wipe_event_hook(WipeEventFn fn) { g_wipeEventFn.store(fn); }
+void set_load_hold(bool on) { g_loadHoldOn.store(on); BVR_LOG("gfx_hud: LOADHOLD %s", on ? "on" : "off"); }
+void set_wipe_reveal_skip(int ms) { g_revealSkipMs.store(ms < 0 ? 0 : ms > 900 ? 900 : ms); BVR_LOG("gfx_hud: WIPEREVEAL skips %d ms", g_revealSkipMs.load()); }
+void set_pre_reveal(int ms) { g_preRevealMs.store(ms < 0 ? 0 : ms > 3000 ? 3000 : ms); BVR_LOG("gfx_hud: PREREVEAL %d ms after loading goes quiet", g_preRevealMs.load()); }
+void set_wipe_reveal(bool on) { g_revealOn.store(on); BVR_LOG("gfx_hud: WIPEREVEAL %s", on ? "on" : "off"); }
+void set_glow_zone(int mode) {
+    g_glowZoneMode.store(mode);
+    BVR_LOG("gfx_hud: glowzone mode %d (0 anchor only, 1 + glow pastes, 2 + a piece between two of one group / picture middle with the next piece, 3 + picture "
+            "middle alone, 4 + lone pieces take the next piece's group) | pieces moved so far %u", mode, g_picZoneMoved.load());
+}
 void set_map_screen(bool on) { g_mapScreenOn.store(on); BVR_LOG("gfx_hud: map screen exception %s", on ? "ON" : "off (test)"); }
 void set_stage_box(bool on) { g_stageBox.store(on); BVR_LOG("gfx_hud: stage box / first cut / fade skip %s", on ? "ON" : "off"); }
 void set_menu_cut(bool on) { g_menuCut.store(on); BVR_LOG("gfx_hud: menu cut pieces %s", on ? "ALL in the eye (outside gameplay)" : "as before"); }

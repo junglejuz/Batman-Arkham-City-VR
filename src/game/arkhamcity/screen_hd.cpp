@@ -2,6 +2,7 @@
 #include "game/arkhamcity/screen_hd.h"
 #include "core/gfx/blit.h"
 #include "core/gfx/frame_inspector.h"
+#include "core/gfx/gfx_hud.h"
 #include "game/arkhamcity/vision.h"
 #include "game/arkhamcity/window.h"
 #include "core/util/log.h"
@@ -11,17 +12,20 @@
 #include <wincodec.h>
 #include <windows.h>
 
+#include "imgui.h"
+
 #include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace bvr::ac::screen_hd {
 namespace {
 
 std::atomic<bool> g_on{true};    // swap in the upscaled pictures that exist
-std::atomic<bool> g_dump{true};  // save every new loading-screen picture once
+std::atomic<bool> g_dump{false}; // save every new loading-screen picture once (test tool: `bc hd dump 1`; off for players)
 std::atomic<uint32_t> g_seen{0}, g_dumped{0}, g_loaded{0}, g_swaps{0}, g_skipped{0};
 
 struct Entry {
@@ -313,13 +317,18 @@ ID3D11ShaderResourceView* load_named(ID3D11Device* dev, ID3D11DeviceContext* ctx
     std::vector<uint8_t> px;
     UINT w = 0, h = 0;
     if (!load_png(file, px, w, h)) return nullptr;
+    // HDMIPS: full mip chain - the 2048 slideshow pictures end up ~1400 px wide on the loading screen
     D3D11_TEXTURE2D_DESC d{};
-    d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1; d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    d.SampleDesc.Count = 1; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    D3D11_SUBRESOURCE_DATA init{px.data(), w * 4, 0};
+    d.Width = w; d.Height = h; d.MipLevels = 0; d.ArraySize = 1; d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.SampleDesc.Count = 1; d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    d.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
     ID3D11Texture2D* t = nullptr;
     ID3D11ShaderResourceView* srv = nullptr;
-    if (SUCCEEDED(dev->CreateTexture2D(&d, &init, &t))) dev->CreateShaderResourceView(t, nullptr, &srv);
+    if (SUCCEEDED(dev->CreateTexture2D(&d, nullptr, &t)) && SUCCEEDED(dev->CreateShaderResourceView(t, nullptr, &srv))) {
+        bvr::frame_inspector::ScopedSuppress quiet;
+        ctx->UpdateSubresource(t, 0, nullptr, px.data(), w * 4, 0);
+        ctx->GenerateMips(srv);
+    }
     if (t) t->Release();
     BVR_LOG("[hd] logo card %ls: %s (%ux%u)", name, srv ? "loaded" : "FAILED", w, h);
     return srv;
@@ -328,8 +337,17 @@ ID3D11ShaderResourceView* load_named(ID3D11Device* dev, ID3D11DeviceContext* ctx
 } // namespace
 
 void logo_frame(ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
-    const bool playing = vision::movie_playing() && window::logo_video_opened();
-    if (!playing) { g_logoStart = 0; g_fitDone = false; return; }
+    const bool movie = vision::movie_playing();
+    const bool playing = movie && window::logo_video_opened();
+    if (!playing) {
+        // LOGOONCE (JJ 2026-10-11: the loading screens into the game showed the logo cards first): loading screens open no
+        // .usm, so "the last movie opened was the logo video" stayed true all session - it ends with the logo playback.
+        if (g_logoStart && !movie) {
+            window::forget_logo_video();
+            BVR_LOG("[hd] logo video ended - logo cards off until it plays again");
+        }
+        g_logoStart = 0; g_fitDone = false; return;
+    }
     const ULONGLONG now = GetTickCount64();
     if (!g_logoStart) g_logoStart = now; // the movie's first shown frame (poll_movie sees it start)
     if (!g_logoOn.load(std::memory_order_relaxed) || !ctx || !sc) return;
@@ -444,14 +462,30 @@ bool command(const char* a) {
     else if (starts("logo ")) g_logoOn.store(atoi(a + 5) != 0);
     else if (starts("logooffset ")) g_logoOffsetMs.store(atoi(a + 11));
     else if (!starts("status")) return false;
-    char s[300];
+    char s[420];
     status_line(s, sizeof(s));
     BVR_LOG("[hd] %s", s);
     return true;
 }
 
+void draw_ui() {
+    bool on = g_on.load();
+    if (ImGui::Checkbox("HD loading pictures (AI-upscaled)", &on)) {
+        g_on.store(on);
+        BVR_LOG("[hd] panel: HD loading pictures %s", on ? "ON" : "OFF");
+    }
+}
+
+std::string settings_line() { return std::string("hd_screens=") + (g_on.load() ? "1" : "0") + "\n"; }
+bool settings_read(const char* key, const char* val) {
+    if (strcmp(key, "hd_screens")) return false;
+    g_on.store(atoi(val) != 0);
+    return true;
+}
+
 void status_line(char* out, unsigned n) {
-    snprintf(out, n, "HD screens %s, dump %s | pictures seen %u, saved %u, upscaled loaded %u, swaps %u, table full %u | logo cards %s, frames painted %u",
+    snprintf(out, n, "HD screens %s, dump %s | pictures seen %u, saved %u, upscaled loaded %u, swaps %u, table full %u | "
+             "logo cards %s, frames painted %u",
              g_on.load() ? "on" : "off", g_dump.load() ? "on" : "off", g_seen.load(), g_dumped.load(), g_loaded.load(),
              g_swaps.load(), g_skipped.load(), g_logoOn.load() ? "on" : "off", g_logoFrames.load());
 }

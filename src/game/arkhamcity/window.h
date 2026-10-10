@@ -19,6 +19,7 @@ bool save_launch_res(unsigned w, unsigned h);
 bool keep_focus();             // game never hears it lost focus (no pause on click-away)
 void set_keep_focus(bool on);
 bool logo_video_opened();       // HD LOGO: the movie being played is the opening-logo video
+void forget_logo_video();       // LOGOONCE: the logo video has ended (loading screens are not .usm files)
 bool show_logos();             // play the opening logos (settings.ini opening_logos, read at launch)
 void set_show_logos(bool on);  // next launch
 void skip_logos();             // a pad button during the logos: end them now

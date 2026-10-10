@@ -1,9 +1,12 @@
 <#
   Batman City VR uninstaller. The installer copies it into the game folder (next to BatmanAC.exe).
-  Removes the mod, puts back the game settings exactly as they were before the first install, removes the shortcuts.
-  Optional: -GameDir "<folder with BatmanAC.exe>" -Yes (no questions) -RemoveSettings (also the mod's settings and logs)
+  Removes the mod, puts back the game settings exactly as they were before the first install, removes the shortcuts and
+  the mod's own VR settings, logs and recordings (%LOCALAPPDATA%\Batman_City).
+  Optional: -GameDir "<folder with BatmanAC.exe>" -Yes (no questions) -KeepSettings (keep the mod's VR settings, e.g. to
+  reinstall) -KeepShortcuts (practice runs)
 #>
-param([string]$GameDir, [switch]$Yes, [switch]$RemoveSettings, [switch]$KeepSelf)
+param([string]$GameDir, [switch]$Yes, [switch]$KeepSettings, [switch]$KeepShortcuts, [switch]$KeepSelf,
+      [switch]$RemoveSettings) # -RemoveSettings: older name, now the default
 
 $ErrorActionPreference = 'Stop'
 function Say([string]$text, [string]$color = 'Gray') { Write-Host $text -ForegroundColor $color }
@@ -64,15 +67,20 @@ if (Test-Path (Join-Path $bk 'config\BmEngine.ini')) {
 }
 
 # ---- shortcuts ----------------------------------------------------------------------------------------
-$desk = [Environment]::GetFolderPath('Desktop')
-foreach ($n in 'Batman City VR.lnk', 'Batman City VR (SteamVR).lnk') { $p = Join-Path $desk $n; if (Test-Path $p) { Remove-Item $p -Force } }
-$start = Join-Path ([Environment]::GetFolderPath('Programs')) 'Batman City VR'
-if (Test-Path $start) { Remove-Item $start -Recurse -Force }
+if (-not $KeepShortcuts) {
+    $desk = [Environment]::GetFolderPath('Desktop')
+    foreach ($n in 'Batman City VR.lnk', 'Batman City VR (SteamVR).lnk') { $p = Join-Path $desk $n; if (Test-Path $p) { Remove-Item $p -Force } }
+    $start = Join-Path ([Environment]::GetFolderPath('Programs')) 'Batman City VR'
+    if (Test-Path $start) { Remove-Item $start -Recurse -Force }
+}
 
-if ($RemoveSettings -or (-not $Yes -and (Read-Host '  Also delete the mod''s own VR settings and logs? (y/n)') -match '^[yY]')) {
-    $data = Join-Path $env:LOCALAPPDATA 'Batman_City'
-    if (Test-Path $data) { Remove-Item $data -Recurse -Force }
-    Say '  VR settings and logs deleted.'
+# ---- the mod's own VR settings, logs and recordings (settings.ini, launch.ini, the bat transition, captures) ---------
+$data = Join-Path $env:LOCALAPPDATA 'Batman_City'
+if ($KeepSettings) {
+    Say "  Your VR settings are kept in $data (-KeepSettings)."
+} elseif (Test-Path $data) {
+    Remove-Item $data -Recurse -Force
+    Say '  The mod''s VR settings, logs and recordings are deleted.' Green
 }
 if (Test-Path $bk) { Remove-Item $bk -Recurse -Force }
 

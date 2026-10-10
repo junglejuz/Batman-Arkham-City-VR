@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 // Batman City HD SCREENS (JJ 2026-10-10: "replace ... all the loading screens [with] higher resolution AI upscaled
 // versions. We can use my magnific account"; BATMAN_CITY_PLAN.md "HD SCREENS"). While a full-screen movie plays (the
 // loading screens), every picture a draw samples is fingerprinted once (the RETICLEHD method: decoded to RGBA8, read
@@ -7,6 +8,7 @@
 // The upscaled art is the game's (WB): it stays on this PC, never in the public repository.
 
 struct ID3D11DeviceContext;
+struct ID3D11Resource;
 struct IDXGISwapChain;
 
 namespace bvr::ac::screen_hd {
@@ -19,7 +21,10 @@ void after_draw(ID3D11DeviceContext* ctx);
 // (frames 11-164) and the tech-logos card (165-312) are painted over the frame from
 // <game>\BatmanCityData\hd\logo_title.png / logo_tech.png (Magnific 2x). Present thread, before the eye capture.
 void logo_frame(ID3D11DeviceContext* ctx, IDXGISwapChain* sc);
-bool command(const char* args); // "bc hd on|off|dump 0|1|status"
+bool command(const char* args); // "bc hd on|off|dump 0|1|logo 0|1|logooffset N|status"
 void status_line(char* out, unsigned n);
+void draw_ui(); // panel MENUS AND SCREENS: HD pictures on / off
+std::string settings_line();                       // "hd_screens=0|1"
+bool settings_read(const char* key, const char* val);
 
 } // namespace bvr::ac::screen_hd
