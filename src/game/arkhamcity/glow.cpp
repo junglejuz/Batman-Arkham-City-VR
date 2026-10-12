@@ -444,6 +444,19 @@ HRESULT WINAPI create_dev_sw_detour(IDXGIAdapter* a, D3D_DRIVER_TYPE t, HMODULE 
     return hr;
 }
 
+} // namespace
+bool ps_checksum(ID3D11PixelShader* ps, unsigned long long* out) {
+    bool ok = false;
+    AcquireSRWLockShared(&g_psLock);
+    auto it = g_psCode.find(ps);
+    if (it != g_psCode.end() && it->second.size() >= 12 && it->second.compare(0, 4, "DXBC") == 0) {
+        memcpy(out, it->second.data() + 4, 8);
+        ok = true;
+    }
+    ReleaseSRWLockShared(&g_psLock);
+    return ok;
+}
+namespace {
 // Render thread: save the bound pixel shader of a full-screen pass once (by shader), with a note of its targets.
 std::atomic<int> g_dumped{0};
 ID3D11PixelShader* g_dumpedPs[48] = {};

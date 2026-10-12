@@ -9,7 +9,12 @@
 struct ID3D11DeviceContext;
 #include <string>
 
+struct ID3D11PixelShader;
+
 namespace bvr::ac::glow {
+
+// DETVR: the DXBC checksum (its first 8 bytes) of a game pixel shader, from the creation record; false = not recorded.
+bool ps_checksum(ID3D11PixelShader* ps, unsigned long long* out);
 
 // Render thread, every DrawIndexed(6) before it runs: true when this was the combine pass and our inputs are bound
 // (after_draw puts the game's back).

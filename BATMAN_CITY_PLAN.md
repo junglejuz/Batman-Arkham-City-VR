@@ -1854,3 +1854,104 @@ saved and any other probes and tests and unused code cleaned up"; NOT published)
   zip dll = installed dll; settings = JJ's (hud_size_m 7.726 = 88 deg at 4 m, first_person=0 for new players); Windows
   tar lists 117 entries. Installer / uninstaller unchanged since 0.1.2 (its practice run stands). The cleaned build has
   NOT been run in the game yet.
+
+## TEST PLAN DV1 - detective mode's vignette per eye (2026-10-12; JJ: "detective mode still has a separate vignette for
+## each eye, whereas they should fuse into one single one") - package 0.1.3 on hold
+Looked up: this plan round 5 (2026-10-03: the detective circle is the game's own, one per eye, screen-fixed; ruled out the
+detective final pass's 40 PS constants, the camera-attached 256x128 quads and the detective-only Draw(78) - "drawn INTO
+the scene before" the final pass; our full-view vignette covers most of it), DETSTEADY / DETSIZE; AKN NOTES "DETVIG"
+(c022421: hiding the detective composite PS ce8b103bb56ebabe removed AK's per-eye vignette, corners 1.0 -> 18.8; AKVR then
+draws ONE view-fixed vignette - City already has that half: vig_on_detective); AKN CAPDET "vignette hunt" method.
+Ranked causes: (1) a detective-only full-screen pass composites the circle into the scene; (2) a shared post pass (tone
+map / composite) whose vignette constant detective mode raises; (3) a non-full-screen draw (geometry ring) - next step.
+SOURCE DVHUNT (vision.cpp, test): every full-screen pass of an eye-size target (DrawIndexed 6, Draw 3 / 4) listed with its
+PS and its first 16 PS constants in normal play and in detective mode; started in detective mode (panel ZOOM AND DETECTIVE
+VISION button / `bc vis dvhunt`): baseline, then each detective pass hidden 0.6 s with the eye picture's four corners and
+centre read back (32x32, 8 % in from the edges) -> log "DVHUNT pass N ... corners (xK) centre (xK) corner/centre | constants
+normal->detective". Installed D7684D17FC5395A2 (backup backups\batman_city.dll.before-dvhunt).
+| # | JJ does | judge (me, log) |
+|---|---|---|
+| 1 | play normally ~20 s (fills the normal list), then detective mode on, stand still facing open space, "ready" | - |
+| 2 | I send `bc vis dvhunt` (~20 s), JJ keeps still in detective mode | a pass whose hiding lifts corners x2+ with the centre ~x1 = the vignette (cause 1) |
+| 3 | if none: a shared pass listed with constants differing normal->detective | `bc vis set`-style override of that constant next build (cause 2) |
+Follow-ups: cause 1 -> skip that pass in detective mode (AKN DETVIG) + keep our view-fixed vignette; cause 2 -> patch the
+constant; neither -> extend the list to non-full-screen draws.
+### DV1 RESULTS (23:27-23:31, JJ in detective mode, standing) -> DETVIG
+- LIVE DVHUNT: 47 full-screen passes in detective mode. Baseline corners 12.9 / 24.5 / 7.2 / 6.1, centre 29.9 (0.42).
+  Pass 42 (Draw 3, eye-size target, ALSO in normal play): hidden -> corners x5.57, centre x1.06, corner/centre 2.23; its
+  PS constants c2.x c2.y c3.x c3.y = 0.836 0.0082 0.986 0.373 normal -> 0.102 0.145 0.246 0.615 detective = the game's
+  per-eye detective vignette is a SHARED pass whose settings change (cause 2). Pass 4 (the detective tint) changes the
+  centre x4.7 - not it. Others ~x1.
+- JJ: "even more visible when I am in detective mode and then I press pause". LIVE: detective_active() went off at the
+  pause (the detective final pass stops) -> our shared vignette fades out while the game's per-eye one stays.
+- The saved post shaders (glow SHADERDUMP, capped at 48) do not hold it (ps_37 reads c2.xy/c3.xy but is a 3-target
+  material shader) -> no permanent fingerprint yet.
+- SOURCE DETVIG (vision.cpp + glow ps_checksum/ps_save): DVHUNT logs each pass's DXBC checksum and LEARNS the pass whose
+  hiding lifts the corners x2+ with the centre x0.8-1.3 (saved det_vignette_ps, bytecode to detvig_<chk>.dxbc); that
+  shader's Draw-3 pass is skipped while c3.x < 0.6 (detective setting), and our view-fixed vignette is shown whenever it
+  runs so (det_vignette_now) - paused included. `bc vis detvig 0|1` A/B. Installed 2AF8D2B1179F7ABF (backup
+  before-detvig). After JJ confirms: hard-code the checksum, hide DVHUNT, rebuild the package.
+| # | JJ does | judge |
+|---|---|---|
+| 1 | gameplay 20 s, detective on, stand still, "ready"; I run `bc vis dvhunt` | log "detective vignette = pass N, shader <chk> ... now hidden" |
+| 2 | look around in detective mode | one fused vignette, no per-eye circles |
+| 3 | pause in detective mode | same: one vignette, no circles |
+| 4 | I send `bc vis detvig 0`, then `1` (JJ says what changes) | 0 brings the circles back |
+| 5 | normal play, zoom | unchanged |
+### DV2 RESULTS (23:35-23:38) -> DETVIG2
+- LIVE DVHUNT: pass 41 (shader DXBC 9f1079e5fc4a7d14, Draw 3, also in normal play): corners x5.76, centre x1.66 (this
+  view) -> refused by the learning rule (centre limit 1.3) - nothing learned, the fix never ran (JJ: still obvious when
+  paused in detective mode). Constants this time: c2.x 0.807 -> 0.094, c2.y 0.66 -> 0.795, c3.x 0.0956 -> 0.358, c3.y
+  0.24 -> 0.486: c3.x is scene-dependent (the c3.x < 0.6 guard was wrong); c2.x drops to ~0.1 in detective both times.
+- The DV1 build saved det_vignette_ps=0 into JJ's settings (SAVEALL) - now ignored (0 keeps the built-in value).
+- SOURCE DETVIG2: built-in shader 9f1079e5fc4a7d14; detective setting = c2.x < 0.4; bytecode saved to
+  %LOCALAPPDATA%\Batman_City\detvig_<chk>.dxbc on first sight; modes (`bc vis detvig 0|1|2`): 0 shown, 1 skipped (default),
+  2 drawn with constants put back (`bc vis detvig set <idx> <val>`, `bc vis detvig clear`; our own constant buffer bound
+  for that draw, the game's put back after). Shared vignette whenever the pass runs in its detective setting (paused
+  too). Installed B4291082F3A60D61 (backup before-detvig2).
+| # | JJ / me | judge |
+|---|---|---|
+| 1 | detective on, look around; then pause in detective | one fused vignette, no circles (mode 1); log "DETVIG: ... bytecode saved" |
+| 2 | I disassemble the saved shader, then `detvig set` the vignette constant(s) to their normal values = mode 2 | circles gone AND the detective look keeps its centre brightness |
+| 3 | `detvig 0` / `1` / `2` while JJ watches | 0 = circles back; JJ picks 1 or 2 |
+### DETVIG2 RESULT (23:45-23:47) -> DETVIG3
+- HEADSET (JJ): "while going into detective mode, the detective mode flashes on and off" (the second entry, not the first).
+- LIVE: first sight c2 0.000 0.500 c3 0.625 0.025. STATIC (disassembly of detvig_9f1079e5fc4a7d14.dxbc, ps_5_0, 3
+  targets): detective vision's screen material - scene (t1, screen UV) desaturated / tinted (cb0[5], cb0[1]) x t2 at
+  UV*(4,12) + cb0[2].xy (scrolling scanlines: c2.xy are SCROLL OFFSETS that wrap -> the c2.x < 0.4 guard flipped the skip
+  = the flashes) x t3 at UV*2 (mirrored: THE VIGNETTE MASK, screen-fixed per eye) x 2 x saturate(t4 at UV*(24,18) + t3)
+  x (1 + t5 noise x cb0[13].y) + depth outline (t1 depth taps, cb0[14], cb0[4]) + cb0[0].
+- SOURCE DETVIG3: no guard - every draw of this shader gets t3 replaced by a uniform 1x1 texture (value 1.0 = the mask's
+  bright centre everywhere; `bc vis detvig white <v>`); tint, scanlines, noise, outlines unchanged. Modes `bc vis detvig
+  0|1|2` (2 default; 1 = skip). Shared view-fixed vignette while the pass ran within 1 s (paused too). Saved key
+  det_vignette (the DETVIG2 det_vignette_mode=1 is not carried over). Installed 791872457F929A80 (backup before-detvig3).
+- Judge: entering detective twice+ and pausing in it: no flashes, no per-eye circles, one shared vignette, detective look
+  as before (brightness: `detvig white 0.8 / 1.2` if JJ finds it brighter or darker than stock).
+### DETVIG3 RESULT (23:49-23:52) -> DETVR
+- HEADSET (JJ): "the beehive type texture has been lost", another overlay "moves with your head", and paused in detective
+  "a new sort of grunge overlay that's attached to your head". Switched to mode 0 live (game's own) at 23:51:56.
+- Re-read: t3 = honeycomb AND vignette; t2 (scanlines), t4 / t5 (grain) are screen layers too - every overlay layer is laid
+  on each eye's own off-centre screen, so none fuses; removing parts leaves the others head-stuck.
+- SOURCE DETVR (vision.cpp, mode 3 default, saved key det_vignette3): the shader rebuilt as HLSL (re/detvr.hlsl, from the
+  disassembly; re/detvig_9f1079e5fc4a7d14.dxbc = the original) - offline compile: identical input / output signature
+  (COLOR0 / TEXCOORD0 / 4 / 6 / 5 / SV_IsFrontFace, 3 targets, same used masks), 87 instructions. Overlay layers t2-t5
+  sampled at uv' = uv * scale + offset per eye: eye tangent frustum (eye_fov_angles) -> the union frustum of both eyes,
+  so both eyes sample one overlay per view direction (fuses at infinity, head-locked like the flat game). Scene, depth
+  outline (t1 / t6) as the game's. Swapped only for that draw (PS + b4), put back after (dv_after). Eye per pass from
+  scene begin_exec (vision::set_render_pass). `bc vis detvig 0|1|2|3`, `bc vis detvig identity 1` (rebuild without
+  the remap = must look exactly like mode 0). Our own detective vignette only in modes 1 / 2. Installed D80F7F80937155D8.
+| # | JJ / me | judge |
+|---|---|---|
+| 1 | detective on (several entries), look around, pause in it | honeycomb, scanlines, grain, vignette all present and FUSED (one overlay); no flashes |
+| 2 | `detvig identity 1` then `0` | identity = the game's look exactly (rebuild faithful); 0 = per-eye circles back |
+| 3 | `detvig 3` | back to fused |
+### DETVR RESULT + RELEASE 0.1.3 (2026-10-13; JJ: "It's a little bit better. The squares seem to stay quite stable" ...
+### "This is perfect, package and deploy")
+- HEADSET: detective overlay fused. OPEN (JJ, not for this release): world markers on moving targets (drones) "miss the
+  mark a little bit most of the time" - marker lag on movers (see MARKER notes; next session).
+- Cleanup: DVHUNT (hunt, measurement, panel button, command), DETVIG modes 1 / 2 (skip, whitened t3), the identity
+  switch and the bytecode saver removed; vision.cpp keeps DETVR only (`bc vis detoverlay 0|1`, panel test option, saved
+  detective_overlay_fused, default 1). glow keeps ps_checksum. make_package drops the det_vignette* test keys.
+- STATIC: Release built clean, installed B45DDCD7CD20E3A0 (backup before-release013). Package 117 files, 290.5 MB, sha256
+  2ac253852986c5c7..., zip dll = installed, settings: hud 88 deg, markers upright / face 1, first_person 0,
+  detective_overlay_fused 1. The cleaned build itself was not run in the game (JJ asked to deploy).

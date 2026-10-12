@@ -17,6 +17,7 @@ void set_movie_playing(bool on); // a full-screen movie (loading screen, logos) 
 bool movie_playing();
 void tick();                     // game thread, once per frame: fade + publish the vignette
 bool handle_command(const char* args); // "bc vis ..."
+void set_render_pass(int eyeSign); // DETVR: render thread, BeginDrawing execute (-1 left, +1 right, 0 mono)
 void draw_ui();
 void status_line(char* out, unsigned n);
 void settings_write(std::string& out);                 // saved settings, "key=value" lines

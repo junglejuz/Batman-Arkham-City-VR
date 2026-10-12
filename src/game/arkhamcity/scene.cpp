@@ -923,6 +923,7 @@ uint32_t __fastcall begin_exec_detour(void* self, void* edx) {
     afw::set_render_slot(k);
     room_overlay::set_render_slot(k);
     reflect::set_render_pass(k, sign);
+    vision::set_render_pass(sign); // DETVR
     markers::set_render_slot(k);
     billboard::set_render_slot(k);
     dlss_bridge::set_render_slot(k);

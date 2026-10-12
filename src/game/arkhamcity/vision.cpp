@@ -13,10 +13,12 @@
 #include "core/vr/openxr_runtime.h"
 
 #include <d3d11.h>
+#include <d3dcompiler.h>
 #include <imgui.h>
 #include <intrin.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -233,7 +235,9 @@ void draw_after(ID3D11DeviceContext* ctx) {
     glow::after_draw_plain(ctx);
 }
 
-void __cdecl draw_after_plain(ID3D11DeviceContext* ctx) { screen_hd::after_draw(ctx); glow::after_draw_plain(ctx); }
+void detvr_after(ID3D11DeviceContext* ctx); // DETVR, below
+void detvr_draw(ID3D11DeviceContext* ctx, unsigned count, bool indexed);
+void __cdecl draw_after_plain(ID3D11DeviceContext* ctx) { detvr_after(ctx); screen_hd::after_draw(ctx); glow::after_draw_plain(ctx); }
 bool draw_indexed_inner(ID3D11DeviceContext* ctx, unsigned indexCount);
 // HD SCREENS: the upscaled loading-screen picture bound for this draw (put back in draw_after, or at once when skipped)
 bool __cdecl draw_indexed_hook(ID3D11DeviceContext* ctx, unsigned indexCount) {
@@ -374,6 +378,197 @@ bool draw_indexed_inner(ID3D11DeviceContext* ctx, unsigned indexCount) {
     return false;
 }
 
+// --- DETVR: detective vision's screen overlay, fused for VR ------------------------------------------------------
+// JJ 2026-10-12: "detective mode still has a separate vignette for each eye, whereas they should fuse into one". The
+// detective look is one screen material (DXBC checksum 9f1079e5fc4a7d14; found by a pass-hiding hunt: hiding it lifted the
+// picture corners x5.6). Disassembled (re/detvig_9f1079e5fc4a7d14.dxbc): it lays its overlay layers - t2 scanlines (c2.xy =
+// their scroll), t3 honeycomb + vignette (at UV x2, mirrored), t4 / t5 grain - on each eye's own off-centre screen, so none
+// fuses. Skipping the pass flashed (the scroll offset was mistaken for a detective flag) and whitening t3 lost the honeycomb.
+// The fix: the shader is rebuilt (re/detvr.hlsl, identical signature) with the overlay layers sampled at a SHARED view
+// direction - each eye's screen position -> tangent of its own frustum -> position in the union frustum of both eyes - so
+// both eyes see one overlay (JJ: "This is perfect"). Scene and depth outlines stay the game's. Swapped for that one draw.
+constexpr unsigned long long kDetVrShader = 0x9f1079e5fc4a7d14ull;
+std::atomic<bool> g_detVrOn{true};
+const char kDetVrHlsl[] = R"HLSL(// DETVR: Arkham City's detective-vision screen material (DXBC 9f1079e5fc4a7d14), rebuilt from its disassembly, with the
+// overlay textures (t2 scanlines, t3 honeycomb + vignette, t4 / t5 grain) sampled at a SHARED view direction instead of
+// each eye's own screen position, so both eyes see the same overlay and it fuses. vrRemap: uv' = uv * xy + zw.
+cbuffer CB0 : register(b0) { float4 c0[15]; };
+cbuffer CB2 : register(b2) { float4 c2[5]; };
+cbuffer VR : register(b4) { float4 vrRemap; };
+Texture2D t0 : register(t0);
+Texture2D t1 : register(t1);
+Texture2D t2 : register(t2);
+Texture2D t3 : register(t3);
+Texture2D t4 : register(t4);
+Texture2D t5 : register(t5);
+Texture2D t6 : register(t6);
+SamplerState s0 : register(s0);
+SamplerState s1 : register(s1);
+SamplerState s2 : register(s2);
+SamplerState s3 : register(s3);
+SamplerState s4 : register(s4);
+SamplerState s5 : register(s5);
+SamplerState s6 : register(s6);
+
+struct PSIn {
+    float4 col : COLOR0;
+    float4 tc0 : TEXCOORD0;
+    float4 v2 : TEXCOORD4;
+    float4 tc6 : TEXCOORD6;
+    float4 v4 : TEXCOORD5;
+    bool ff : SV_IsFrontFace;
+};
+struct PSOut {
+    float4 o0 : SV_Target0;
+    float4 o1 : SV_Target1;
+    float4 o2 : SV_Target2;
+};
+
+PSOut main(PSIn i) {
+    const bool flag = 0.0 != c2[4].x;
+    float3 p = i.v4.xyw; // (x, y, w)
+    if (flag) {
+        const float2 a = t0.Sample(s1, float2(0.0625, 0.0)).xy;
+        const float x = a.x * (i.v4.w - a.y) + i.v4.x;
+        p = float3(i.v4.w != 1.0 ? x : i.v4.x, i.v4.y, i.v4.w);
+    }
+    float4 r1 = float4(p.xy / p.z, p.xy / p.z);
+    r1 = r1 * c2[0].xyxy + c2[0].wzwz;
+    const float2 uv = r1.zw;
+    const float2 ov = uv * vrRemap.xy + vrRemap.zw; // DETVR: the shared overlay position
+
+    float3 r2 = t1.Sample(s0, uv).xyz;
+    float3 r3 = sqrt(r2) - r2;
+    r2 = c0[5].x * r3 + r2;
+    const float lum = dot(r2, float3(0.666, 0.25075, 0.08325));
+    r3 = lum * c0[1].xyz - r2;
+    r2 = c0[5].y * r3 + r2;
+    const float scan = t2.SampleBias(s2, ov * float2(4.0, 12.0) + c0[2].xy, 0.0).x;
+    r2 *= scan;
+    const float3 hex = t3.SampleBias(s3, ov + ov, 0.0).xyz;
+    float g = saturate(t4.SampleBias(s4, ov * float2(24.0, 18.0), 0.0).z + hex.x);
+    g = g + g;
+    r2 *= hex * g;
+    float3 n = t5.SampleBias(s5, float2(ov.x * 4.0 + c0[12].w, ov.y * 4.0 + c0[13].x), 0.0).xyz;
+    n = n * c0[13].y + 1.0;
+
+    const float dz = c2[1].z, dw = c2[1].w;
+    float4 r5;
+    r5.x = 1.0 / (t1.SampleLevel(s0, float2(uv.x + 0.000587, uv.y), 0.0).w * dz - dw);
+    r5.z = 1.0 / (t1.SampleLevel(s0, float2(uv.x, uv.y + 0.000695), 0.0).w * dz - dw);
+    const float dc = 1.0 / (t1.SampleLevel(s0, uv, 0.0).w * dz - dw);
+    r5.y = 1.0 / (t1.SampleLevel(s0, float2(uv.x - 0.000587, uv.y), 0.0).w * dz - dw);
+    r5.w = 1.0 / (t1.SampleLevel(s0, float2(uv.x, uv.y - 0.000695), 0.0).w * dz - dw);
+
+    const float k = dc / p.z;
+    float qx = k * p.x, qy = k * p.z;
+    if (flag) {
+        const float2 a = t0.Sample(s1, float2(0.0625, 0.0)).xy;
+        const float z = -a.x * (p.z * k - a.y) + qx;
+        qx = qy != 1.0 ? z : qx;
+    }
+    const float ex = (qx / qy) * c2[0].x + c2[0].w;
+    const float edge = t6.SampleBias(s6, float2(ex + c0[3].x, dc * 0.001 + c0[3].y), 0.0).y;
+    const float4 m = min(r5, c0[14].wwww) - min(dc, c0[14].w);
+    float e = dot(m, float4(0.25, 0.25, 0.25, 0.25)) * (c0[14].z / dc);
+    e = saturate(edge * e);
+    e = e * (1.0 - e);
+    float3 r0 = c0[4].xyz * c0[4].w * e;
+    r0 = r2 * n + r0;
+    r0 += c0[0].xyz;
+    PSOut o;
+    o.o0 = float4(r0 * i.v2.w + i.v2.xyz, 1.0);
+    o.o1 = 0;
+    o.o2 = 0;
+    return o;
+}
+)HLSL";
+ID3D11PixelShader* g_detVrPs = nullptr;   // render thread
+bool g_detVrTried = false;
+ID3D11Buffer* g_detVrCb = nullptr;        // b4: the remap
+ID3D11PixelShader* g_detVrGamePs = nullptr;
+ID3D11Buffer* g_detVrGameCb = nullptr;
+bool g_detVrSwapped = false;
+std::atomic<int> g_passEye{0};            // render thread: -1 left, +1 right, 0 mono (scene begin_exec)
+std::atomic<uint32_t> g_detVrDraws{0};
+void detvr_remap(float out[4]) {
+    out[0] = 1.0f; out[1] = 1.0f; out[2] = 0.0f; out[3] = 0.0f;
+    const int sign = g_passEye.load(std::memory_order_relaxed);
+    float a[2][4];
+    if (!sign || !bvr::vr::eye_fov_angles(0, a[0]) || !bvr::vr::eye_fov_angles(1, a[1]))
+        return;
+    float t[2][4];
+    for (int e = 0; e < 2; ++e)
+        for (int k = 0; k < 4; ++k) t[e][k] = tanf(a[e][k]);
+    const float L = (std::min)(t[0][0], t[1][0]), R = (std::max)(t[0][1], t[1][1]);
+    const float U = (std::max)(t[0][2], t[1][2]), D = (std::min)(t[0][3], t[1][3]);
+    const float* e = t[sign < 0 ? 0 : 1];
+    if (R - L < 1e-4f || U - D < 1e-4f) return;
+    out[0] = (e[1] - e[0]) / (R - L);
+    out[2] = (e[0] - L) / (R - L);
+    out[1] = (e[2] - e[3]) / (U - D);
+    out[3] = (U - e[2]) / (U - D);
+}
+bool detvr_ready(ID3D11DeviceContext* ctx) {
+    if (g_detVrPs && g_detVrCb) return true;
+    if (g_detVrTried) return false;
+    g_detVrTried = true;
+    ID3DBlob* code = nullptr;
+    ID3DBlob* err = nullptr;
+    const HRESULT hr = D3DCompile(kDetVrHlsl, sizeof(kDetVrHlsl) - 1, "detvr", nullptr, nullptr, "main", "ps_5_0",
+                                  D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &err);
+    if (FAILED(hr) || !code) {
+        BVR_LOG("[bc] DETVR: compile FAILED %08X %s", unsigned(hr), err ? static_cast<const char*>(err->GetBufferPointer()) : "");
+        if (err) err->Release();
+        if (code) code->Release();
+        return false;
+    }
+    if (err) err->Release();
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (dev) {
+        dev->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_detVrPs);
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        dev->CreateBuffer(&bd, nullptr, &g_detVrCb);
+        dev->Release();
+    }
+    code->Release();
+    BVR_LOG("[bc] DETVR: detective screen shader rebuilt %s", g_detVrPs && g_detVrCb ? "and ready" : "but NOT created");
+    return g_detVrPs && g_detVrCb;
+}
+// Before a Draw(3): the detective screen material gets the rebuild (put back in detvr_after). Never drops the draw.
+void detvr_draw(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
+    if (indexed || count != 3 || !g_detVrOn.load(std::memory_order_relaxed)) return;
+    ID3D11PixelShader* ps = nullptr;
+    ctx->PSGetShader(&ps, nullptr, nullptr);
+    if (!ps) return;
+    static ID3D11PixelShader* s_ps[8] = {};
+    static unsigned long long s_chk[8] = {};
+    unsigned long long chk = 0;
+    const unsigned slot = static_cast<unsigned>(reinterpret_cast<uintptr_t>(ps) >> 4) & 7;
+    if (s_ps[slot] == ps) chk = s_chk[slot];
+    else if (glow::ps_checksum(ps, &chk)) { s_ps[slot] = ps; s_chk[slot] = chk; }
+    if (chk != kDetVrShader || !detvr_ready(ctx)) { ps->Release(); return; }
+    float r[4];
+    detvr_remap(r);
+    ctx->UpdateSubresource(g_detVrCb, 0, nullptr, r, 0, 0);
+    g_detVrGamePs = ps; // reference kept until detvr_after
+    ctx->PSGetConstantBuffers(4, 1, &g_detVrGameCb);
+    ctx->PSSetShader(g_detVrPs, nullptr, 0);
+    ctx->PSSetConstantBuffers(4, 1, &g_detVrCb);
+    g_detVrSwapped = true;
+    g_detVrDraws.fetch_add(1, std::memory_order_relaxed);
+}
+void detvr_after(ID3D11DeviceContext* ctx) {
+    if (!g_detVrSwapped) return;
+    g_detVrSwapped = false;
+    ctx->PSSetShader(g_detVrGamePs, nullptr, 0);
+    ctx->PSSetConstantBuffers(4, 1, &g_detVrGameCb);
+    if (g_detVrGamePs) { g_detVrGamePs->Release(); g_detVrGamePs = nullptr; }
+    if (g_detVrGameCb) { g_detVrGameCb->Release(); g_detVrGameCb = nullptr; }
+}
+
 } // namespace
 
 std::atomic<int> g_vpLogReset{0};
@@ -424,6 +619,7 @@ bool __cdecl viewport_tap(ID3D11DeviceContext*, unsigned n, void* vpsRaw) {
 bool draw_skip(ID3D11DeviceContext* ctx, unsigned vertexCount) {
     if (glow::on_draw_plain(ctx, vertexCount)) return true;
     if (loadbox2_skip(ctx, vertexCount, false)) return true;
+    detvr_draw(ctx, vertexCount, false); // DETVR: after every rule that can drop the draw (it is put back after the draw)
     if (vertexCount != 78 || !g_hideDetOverlay.load(std::memory_order_relaxed) || !detective_active()) return false;
     g_detOverlaySkips.fetch_add(1, std::memory_order_relaxed);
     return true;
@@ -439,6 +635,8 @@ void settings_write(std::string& out) {
               g_vigOnZoom.load() ? 1 : 0, g_vigOnDetective.load() ? 1 : 0, g_hideZoomStencil.load() ? 1 : 0,
               g_zoomBelowDeg.load(), s, c, r);
     out += line;
+    sprintf_s(line, "detective_overlay_fused=%d\n", g_detVrOn.load() ? 1 : 0); // DETVR
+    out += line;
 }
 
 bool settings_read(const char* key, const char* val) {
@@ -448,6 +646,8 @@ bool settings_read(const char* key, const char* val) {
     bvr::vr::get_vignette_look(&s, &c, &r);
     if (!strcmp(key, "vig_on_zoom")) g_vigOnZoom.store(on);
     else if (!strcmp(key, "vig_on_detective")) g_vigOnDetective.store(on);
+    else if (!strcmp(key, "detective_overlay_fused")) g_detVrOn.store(on); // DETVR
+    else if (!strncmp(key, "det_vignette", 12)) {} // test builds of 2026-10-12 - not carried over
     else if (!strcmp(key, "hide_zoom_frame")) g_hideZoomStencil.store(on);
     else if (!strcmp(key, "zoom_below_deg")) { if (f > 5.0f && f < 120.0f) g_zoomBelowDeg.store(f); }
     else if (!strcmp(key, "vig_strength")) bvr::vr::set_vignette_look(f < 0 ? 0 : (f > 1 ? 1 : f), c, r);
@@ -485,15 +685,23 @@ void tick() {
         g_zoomWas = !g_zoomWas;
         BVR_LOG("[bc] vision: zoom %s (game fov %.1f deg)", g_zoomWas ? "ON" : "off", g_gameHfov.load());
     }
-    const bool want = (g_vigOnZoom.load() && zoom_active()) || (g_vigOnDetective.load() && detective_active());
+    const bool want = (g_vigOnZoom.load() && zoom_active()) ||
+                      (g_vigOnDetective.load() && detective_active());
     const float step = 1.0f / 8.0f; // ~0.1 s at 90 Hz
     g_amt = want ? (g_amt + step > 1.0f ? 1.0f : g_amt + step) : (g_amt - step < 0.0f ? 0.0f : g_amt - step);
     bvr::vr::set_vignette(g_amt);
 }
 
+void set_render_pass(int eyeSign) { g_passEye.store(eyeSign, std::memory_order_relaxed); } // DETVR
 bool handle_command(const char* args) {
-    // "vis set <idx> <val>" (detective constant override), "vis clear", "vis zoom <deg>"
+    // "vis set <idx> <val>" (detective constant override), "vis clear", "vis zoom <deg>", "vis detoverlay 0|1" (DETVR)
     if (!args) return false;
+    if (_strnicmp(args, "detoverlay ", 11) == 0) {
+        g_detVrOn.store(atoi(args + 11) != 0);
+        BVR_LOG("[bc] DETVR: detective overlay %s (rebuilt draws %u)", g_detVrOn.load() ? "fused" : "as the game draws it",
+                g_detVrDraws.load());
+        return true;
+    }
     if (_strnicmp(args, "set ", 4) == 0) {
         int idx = 0;
         float val = 0.0f;
@@ -570,6 +778,10 @@ void draw_ui() {
     ch |= bvr::overlay::SliderStep("clear centre  (deg)", &c, 5.0f, 60.0f, "%.0f");
     ch |= bvr::overlay::SliderStep("fade width  (deg)", &r, 2.0f, 60.0f, "%.0f");
     if (ch) bvr::vr::set_vignette_look(s, c, r);
+    if (bvr::overlay::show_tests()) {
+        bool fo = g_detVrOn.load();
+        if (ImGui::Checkbox("   detective overlay fused for both eyes", &fo)) g_detVrOn.store(fo); // DETVR
+    }
     if (bvr::overlay::show_tests()) ImGui::TextDisabled("   game view %.0f deg - zoom %s, detective %s", g_gameHfov.load(), zoom_active() ? "ON" : "off",
                         detective_active() ? "ON" : "off");
 }

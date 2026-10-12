@@ -44,6 +44,10 @@ for i, l in enumerate(lines):
     if '=' in l and k in SHIP_OVERRIDES and l != f'{k}={SHIP_OVERRIDES[k]}':
         print(f'settings: {l} -> {k}={SHIP_OVERRIDES[k]}')
         lines[i] = f'{k}={SHIP_OVERRIDES[k]}'
+# 0.1.3: keys of the 2026-10-12 detective-vignette test builds are dropped; the shipped key is detective_overlay_fused.
+lines = [l for l in lines if not l.startswith('det_vignette')]
+if not any(l.startswith('detective_overlay_fused=') for l in lines):
+    lines.append('detective_overlay_fused=1')
 open(sp, 'w', encoding='utf-8', newline='\n').write('\n'.join(lines) + '\n')
 # The launcher's VR render size (JJ's tested DLSS output size) and the recorded bat transition the menus replay (a fresh
 # install would only record it the first time a game is started from the main menu). Installed on first install only.
