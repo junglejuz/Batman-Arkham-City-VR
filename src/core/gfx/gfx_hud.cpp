@@ -48,6 +48,21 @@ ID3D11DepthStencilView* g_curDsv = nullptr; // weak, as last bound by the game
 ID3D11Resource* g_sceneDepth = nullptr;      // weak: the last full-size readable R24G8 depth the game bound (DLSS)
 ID3D11RenderTargetView* g_gameRtv = nullptr; // weak, the game's own rtv0
 bool g_pastBoundary = false;             // the eye blit landed this frame
+// MAPBLIT (ported from Origins 2026-10-11, MAPTRACE: every leaking eye picture on the map was the scene blit itself,
+// carrying the map's own art left in the shared scene picture by the other eye's pass; JJ: City's map flickers the same
+// way). While MAPSCREEN says the map is up, the eye is cleared black and the blit goes on the HUD sheet. Default on.
+ULONGLONG g_mapUntilMs = 0; // MAPSCREEN: map screen up until (render thread)
+std::atomic<bool> g_mapBlit{true};
+std::atomic<uint32_t> g_cMapBlit{0};
+// MAPBLITTAIL (JJ 2026-10-11 22:16: after closing the map "an overlay of the gameplay in 2D over the 3D for a couple of
+// seconds in the location where the map was"): MAPBLIT followed MAPSCREEN's 1.5 s hold, so for 1.5 s after the map
+// closed the gameplay picture went on the menu sheet. MAPBLIT now needs a map shape within the last mapblithold ms (the
+// map draws them every frame) and a stopped game clock (the map pauses the game; set by the adapter).
+ULONGLONG g_mapShapeMs = 0;                 // render thread: the last big untextured shape
+constexpr ULONGLONG kMapBlitHoldMs = 250;
+std::atomic<bool> g_clockStopped{false};    // adapter: the game clock stands (menus, the map)
+std::atomic<ULONGLONG> g_resumedMs{0};      // adapter: the game clock started running again (UNPAUSECUT)
+std::atomic<uint32_t> g_unpauseCuts{0};
 bool g_ourBound = false;                 // our capture RT is currently bound
 bool g_clearedThisFrame = false;
 // HUDDSV (ported from AKN 2026-10-09, VR_ESSENTIALS 6; JJ 2026-10-10 SteamVR: the compass "only seems to disappear when
@@ -574,7 +589,10 @@ std::atomic<bool> g_stageBox{true};
 std::atomic<bool> g_hideWipes{true};
 std::atomic<bool> g_mapScreenOn{true}; // MAPSCREEN: no wipe hiding while the map is up
 bool g_wipeFromGameplay = false; // MENUOPEN2 (log 03:35:53: the clock stopped 4 ms before the replay began, so "gameplay" was already false)
-std::atomic<int> g_menuOpenHoldMs{700};
+// MS2 (JJ 2026-10-11 22:41: the upgrade screen "takes a little bit longer than it probably should"; LIVE: its opening
+// replay ran the full recording + 700 ms hold = 1875 ms - the map ends it early by its big shapes, upgrades has none).
+std::atomic<int> g_menuOpenHoldMs{250};
+std::atomic<ULONGLONG> g_menuWipeAtMs{0}; // MS2: a wipe that started inside the menus (closing / leaving)
 std::atomic<bool> g_openFadeOn{true}; // OPENFADE: the menu-opening fade pieces are not drawn
 std::atomic<uint32_t> g_openFadeSkips{0}; // MENUOPEN: hold after the recorded wipe when a menu opens from gameplay
 // JJ 2026-10-09 (later): "the bat wipe transition works fine going from the menu into the game, so I'd like to keep it".
@@ -1221,7 +1239,9 @@ ID3D11DepthStencilView* hud_dsv(ID3D11DeviceContext* ctx) {
     return g_hudDsv;
 }
 
-Decision classify(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
+Decision classify_inner(ID3D11DeviceContext* ctx, unsigned count, bool indexed);
+Decision classify(ID3D11DeviceContext* ctx, unsigned count, bool indexed) { return classify_inner(ctx, count, indexed); }
+Decision classify_inner(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
     Decision d{};
     if (!g_armed.load(std::memory_order_relaxed)) return d;
     if (!g_onBackbuffer) return d;
@@ -1229,6 +1249,23 @@ Decision classify(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
         if (indexed && is_boundary_blit(ctx, count)) {
             g_pastBoundary = true;
             g_cBoundaries.fetch_add(1, std::memory_order_relaxed);
+            if (g_mapBlit.load(std::memory_order_relaxed) && GetTickCount64() < g_mapUntilMs &&
+                GetTickCount64() - g_mapShapeMs < kMapBlitHoldMs && g_clockStopped.load(std::memory_order_relaxed) && // MAPBLITTAIL
+                g_redirect.load(std::memory_order_relaxed) && g_gameRtv && ensure_capture(ctx)) { // MAPBLIT
+                g_cMapBlit.fetch_add(1, std::memory_order_relaxed);
+                const float black[4] = {0, 0, 0, 1};
+                ctx->ClearRenderTargetView(g_gameRtv, black);
+                if (!g_clearedThisFrame) {
+                    g_clearedThisFrame = true;
+                    const float clear[4] = {0, 0, 0, 0};
+                    ctx->ClearRenderTargetView(g_capRtv, clear);
+                }
+                g_cRedirected.fetch_add(1, std::memory_order_relaxed);
+                g_ourBound = true;
+                d.redirectRtv = g_capRtv;
+                d.redirectDsv = hud_dsv(ctx);
+                d.blend = fixed_blend(ctx);
+            }
         } else if (g_ourBound) {
             // A stale redirect binding survived into a pre-boundary draw
             // (present rolled while our RT was bound and the game has not
@@ -1309,6 +1346,7 @@ Decision classify(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
     // texture pack, so the boot transition counted as gameplay): only after a loading screen (the second full-screen movie: the first is the logos).
     const bool inWorld = g_movieEnds.load(std::memory_order_relaxed) >= 2; // the logos, then a loading screen
     if (keep && nowMs - g_lastKeepMs > 400) g_wipeFromGameplay = gameplay && inWorld; // MENUOPEN2: where this wipe STARTED
+    if (keep && nowMs - g_lastKeepMs > 400 && !gameplay) g_menuWipeAtMs.store(nowMs, std::memory_order_relaxed); // MS2
     if (keep) g_lastKeepMs = nowMs;
     if (keep && mainWipe) g_mainWipeUntil = nowMs + 400;
     // WIPEMAIN2 (JJ 2026-10-09 23:00: save select -> title still "a small black box as well as the full screen bats"):
@@ -1322,7 +1360,7 @@ Decision classify(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
     // (frame dump 031117: 1008-13455 indices each, every frame, clock stopped = "not gameplay"), which the rule "outside
     // gameplay every untextured piece is a wipe" hid. Wipe squares / rings / bat sprites are small or textured. A
     // big untextured shape = the map screen: no wipe hiding (and no replay over it) while it is up, 1.5 s hold.
-    static ULONGLONG s_mapUntil = 0;
+    ULONGLONG& s_mapUntil = g_mapUntilMs; // shared with MAPBLIT
     if (indexed && count >= 2000 && g_mapScreenOn.load(std::memory_order_relaxed) && untextured(ctx)) {
         if (nowMs >= s_mapUntil) {
             BVR_LOG("gfx_hud: map screen (untextured shape of %u indices) - wipe hiding paused while it is up", count);
@@ -1330,6 +1368,7 @@ Decision classify(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
             g_hideAllUntil = 0;
         }
         s_mapUntil = nowMs + 1500;
+        g_mapShapeMs = nowMs; // MAPBLITTAIL
     }
     const bool mapScreen = nowMs < s_mapUntil;
     if (!mapScreen && g_hideWipes.load(std::memory_order_relaxed) && g_cutsToEye.load(std::memory_order_relaxed) &&
@@ -1468,6 +1507,8 @@ Decision classify(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
 
 } // namespace
 
+extern ULONGLONG g_exitUntil; // EXITFADE, defined below (UNPAUSECUT reads it)
+
 ID3D11DepthStencilView* game_dsv() { return g_curDsv; }
 ID3D11Resource* scene_depth() { return g_sceneDepth; }
 const char* hud_zone_name(int i) { return i >= 0 && i < kHudZones ? g_zones[i].name : ""; }
@@ -1535,6 +1576,25 @@ void before_eye_capture(ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
             swprintf_s(pp, L"%s\\hud_panel.bmp", d);
             if (g_capTex) save_texture_bmp(ctx, g_capTex, pp);
             s_nextLong = now - s_t0 >= 2500 ? 0 : now + 250;
+        }
+    }
+    // UNPAUSECUT (JJ 2026-10-11 22:16: unpausing gave a black screen and a bat transition, "it should just go straight
+    // back", and then the audio was gone). Log 22:16:36: closing the pause menu draws a square-wipe piece (placement
+    // 0.189, menus) -> the recorded replay started, held black to the 4 s cap, then WIPEREVEAL (with its sound). Quitting
+    // starts the same way, but the game clock stays stopped into the load. So the clock running again within 2 s of a
+    // menu-side replay start = unpause: the replay is dropped at once, no reveal, the game shows straight away.
+    if (const ULONGLONG resumed = g_resumedMs.exchange(0, std::memory_order_relaxed)) {
+        if (g_replayOn.load(std::memory_order_relaxed) &&
+            !g_wipeFromGameplay && resumed >= g_exitUntil && resumed >= g_replayStart && resumed - g_replayStart < 2000) {
+            g_replayOn.store(false);
+            g_replayInvert = false;
+            g_hideAllUntil = 0;
+            g_hideAllCap = 0;
+            g_blackUntil = 0;
+            g_replayEndMs = now;
+            g_unpauseCuts.fetch_add(1, std::memory_order_relaxed);
+            BVR_LOG("gfx_hud: UNPAUSECUT: the game runs again %llu ms after the menu wipe started - replay dropped, no reveal",
+                    resumed - g_replayStart);
         }
     }
     const bool rec = g_recThisFrame;
@@ -1808,6 +1868,12 @@ void set_glow_zone(int mode) {
     BVR_LOG("gfx_hud: glowzone mode %d (0 anchor only, 1 + glow pastes, 2 + a piece between two of one group / picture middle with the next piece, 3 + picture "
             "middle alone, 4 + lone pieces take the next piece's group) | pieces moved so far %u", mode, g_picZoneMoved.load());
 }
+void set_clock_stopped(bool stopped) {
+    if (g_clockStopped.exchange(stopped, std::memory_order_relaxed) && !stopped)
+        g_resumedMs.store(GetTickCount64(), std::memory_order_relaxed); // UNPAUSECUT: handled at the next present
+}
+uint32_t unpause_cuts() { return g_unpauseCuts.load(); }
+unsigned long long menu_wipe_at() { return g_menuWipeAtMs.load(std::memory_order_relaxed); }
 void set_map_screen(bool on) { g_mapScreenOn.store(on); BVR_LOG("gfx_hud: map screen exception %s", on ? "ON" : "off (test)"); }
 void set_stage_box(bool on) { g_stageBox.store(on); BVR_LOG("gfx_hud: stage box / first cut / fade skip %s", on ? "ON" : "off"); }
 void set_menu_cut(bool on) { g_menuCut.store(on); BVR_LOG("gfx_hud: menu cut pieces %s", on ? "ALL in the eye (outside gameplay)" : "as before"); }

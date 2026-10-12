@@ -1645,3 +1645,212 @@ and then removed when uninstalled"; NOT published)
   GitHub's own asset digest = the local file's (download-back skipped at JJ's request: 290 MB). Notes: what's new since
   0.1, download size, update path (installer over 0.1 keeps VR settings).
 - The cleaned-up build (04:34) was not run in the game before release (JJ knew; told twice).
+
+### PAUSEREFLECT 2026-10-11 17:2x (JJ: paused near water, in the grey pause look, "a weird overlay over the water ... stays
+with your head movements but changes the look of the water as you move your head"; captures 20261011_171831 / 171834)
+- Looked up: VR_ESSENTIALS §2 (anything cached on game time must refresh per eye), this plan's REFLECTEYE / PERCAPTURE
+  (round 9). Same family: the planar reflection (256x240) refreshes only when game time moves (UpdateRequired 0x80A2B0;
+  CaptureScene stores LastCaptureTime +0x48 = family CurrentWorldTime +0x1C, 0x80A51E). PERCAPTURE forced the right pass
+  only if the probe had updated in that frame's left pass.
+- LIVE evidence: the two captures, 3 s apart while paused, show "left-pass captures 771 / right re-captures 771" in both
+  (frozen), right skips 3539 -> 3801 (the check still runs every pass and says no). Paused = game time stands still =
+  NO capture in either eye; the water samples the reflection by SCREEN position (no matrix, REFLECTEYE notes), so the
+  picture from the pause moment slides with the head and the water's look changes as you turn. Flat 2D never shows it:
+  the camera does not move while paused.
+- Fix (reflect.cpp): if the engine says no but the probe was already captured at THIS game time (LastCaptureTime ==
+  CurrentWorldTime, bitwise, non-zero), render it again for this eye. In play = the right pass (old left-pass rule kept
+  as a fallback); paused = both eyes keep re-rendering the probe that was live when the pause began. Status line: new
+  "paused left re-captures" counter. Cost while paused = the same as in play (one small reflection per eye).
+- STATIC: built clean, deployed 17:22 (backup backups\batman_city.dll.before-pausereflect). Not run yet.
+- Test (JJ, one launch): pause by the water as before, turn the head -> water should stay put; take a panel capture
+  paused: "paused left re-captures" must be climbing and "right-pass re-captures" too. Also unpause and check the puddle
+  reflections in play still match in both eyes (PERCAPTURE regression check).
+
+### MARKERUPRIGHT 2026-10-11 17:3x (JJ: "the RB icon next to the grappling hook reticle rotates a little bit with your head
+movements ... reference [Arkham Knight] for how we made them solid")
+- Looked up: VR_WORLD_MARKERS_GUIDE §5 / §5a / §5b (AKN eight builds: MKUPRIGHT = upright card, MKGS = per-vertex
+  perspective, JJ "perfect"); VR_ESSENTIALS §6 markers. City still had MARKERCARD (§5): card in the plane at the object's
+  base depth (leans back with a downward-looking camera) and moved AFFINELY (2x2 Jacobian at R) = exactly AKN's two
+  remaining causes. The off-centre RB prompt shows the swing most; the round reticle hides it.
+- City needs no geometry shader: its Scaleform VS uses all four cb0 columns (pause menu = perspective movie, capture
+  191956 rows with w column), so the homography goes straight into cb0. markers.cpp `upright_card`: right = horizontal
+  perpendicular to the camera heading (sign from base clip-x gradient), up = world +Z, size = W's base clip w / P00, P11
+  (|gradient| of base clip x / y), clip = K0 + q.x*Kx + q.y*Ky folded into rows 0/1/3, z = 0, scaled so w = 1 at W (a
+  VS that forced w = 1 would still put W exactly). Falls back to the old card when the camera looks nearly straight
+  up/down. Also applies to AIMDEPTH reticle pieces. Switch: panel (tests) "markers stand upright in exact perspective",
+  `bc markerupright 0|1`, saved marker_upright (default 1). Status line: "upright 1: placed N, fell back N".
+- STATIC: built clean, deployed 17:38 (backup backups\batman_city.dll.before-markerupright). Not run.
+- Test (JJ, same launch as PAUSEREFLECT): look at a grapple point with the RB prompt, turn and tilt the head - prompt and
+  reticle stay still on the object; stick turns may turn them. A/B with `bc markerupright 0`. If the marker vanishes or
+  jumps, the VS ignores w: report and I switch it off by command.
+
+### MARKERFACE 2026-10-11 17:4x (JJ after MARKERUPRIGHT: "that's better, but shouldn't the markers and the reticles face
+the camera rather than ... facing straight out like the rest of the HUD?")
+- The upright card faces the camera HEADING (vertical card): a grapple point above / below is seen at a slant =
+  squashed, like the level HUD panel. AKN's reason for upright was the head ROLL carried in its game camera and the lean of
+  a card facing the camera's full DIRECTION (one normal for all markers); facing the game camera's POSITION (head-free)
+  with the right edge level has neither.
+- markers.cpp upright_card, g_face (default 1): camera position solved from the base VP (clip x = y = w = 0), normal =
+  W -> camera, right = level, perpendicular to it (sign from base clip x), up = normal x right (z > 0). Size fitted so
+  the base view reproduces the game's layout to first order (base NDC change per world unit along each axis at W).
+  Falls back to the vertical card with the camera almost straight above / below the marker. Offline check
+  (scratchpad facecheck.py): camera solved exactly, normal . (W->camera) = 1, right z = 0, layout reproduced.
+  Switch: panel (tests) "... tilted to face the game camera", `bc markerface 0|1`, saved marker_face; status "face 1: faced N".
+- Build BLOCKED 17:42: gfx_hud.cpp was mid-edit by peer session vr-modding-c0 (LEAKTRACE, undeclared names). Asked it to
+  say when it compiles; not deployed (game still has the MARKERUPRIGHT build of 17:38).
+- HEADSET (JJ ~22:00, reporting on Arkham Knight): "They should be angled towards the camera ... We fixed this in Arkham
+  City" = MARKERFACE confirmed. Ported to AKN as MKFACEPOS (`akvr_native/NOTES.md`).
+
+## MAPBLIT + MAP FLICKER RECORDER (2026-10-11, ported from Origins; JJ: "Arkham City map screen is not actually fixed")
+Origins MAPTRACE (batman_origins/BUILD_PLAN.md "MT2 RESULTS run 2" + the run that followed) found the map flicker: every
+leaking eye picture was the scene blit itself (all HUD pieces on the sheet), carrying the map's own art (grid + glow,
+floor plan) left in the shared scene picture by the other eye's pass; all 176 leaks in one eye. City has the same
+classifier and MAPSCREEN detector.
+- **SOURCE MAPBLIT** (core gfx_hud classify boundary): while MAPSCREEN says the map is up, the eye is cleared black and
+  the scene blit goes on the HUD sheet. `bc mapblit on|off`, panel checkbox next to the recorder, default on.
+- **SOURCE LEAKTRACE / MAPTRACE**: panel "Map flicker recorder (20 s, open the map first)" / `bc maptrace`: 3 s delay,
+  then normal 10 s, MAPBLIT off 5 s, normal 5 s; one line per present (events B boundary / M map blit, draws to sheet /
+  hidden / eye / pre-boundary eye, eye-bound draws listed) + objective eye check (4 strips read back; first 4 leaking
+  pictures saved). Files `%LOCALAPPDATA%\Batman_City\captures\maptrace_<time>\`.
+- STATIC: built clean, deployed 17:5x (backup backups\batman_city.dll.before-mapblit), SHA-256 6CDEFDCD...DD3CD4; it also
+  carries vr-modding-16's MARKERUPRIGHT / MARKERFACE / PAUSEREFLECT. HEADSET: pending.
+- Judge: step 1 and 3 leaks ~0, step 2 leaks > 0 (= the old flicker); JJ sees no copy outside the map window.
+  Branch: leaks in steps 1/3 with "pre:" draws listed = the scene blit is skipped in some passes (Origins EARLYUI case,
+  not ported to City yet) -> port EARLYUI v2.
+- DEPLOYED 17:44 by peer session vr-modding-c0 together with its MAPBLIT / LEAKTRACE (SHA-256 6CDEFDCD...DD3CD4,
+  1,537,536 bytes - smaller than my RelWithDebInfo builds, so likely another config). Verified here: the installed DLL
+  contains "tilted to face the game camera", "markers stand upright", "paused left re-captures". Not run yet.
+
+## MAPFLAT (2026-10-11 evening; JJ: City map copy outside the window still there) - see batman_origins/BUILD_PLAN.md "MAPFLAT"
+- LIVE (batman_city.log): MAPSCREEN fired on the main menu -> game wipe (untextured shape of 2103 indices), i.e. the "map is
+  up" detector that MAPBLIT relies on is not a map signal. Same in Origins, where it never fired in the real map (MAPBLIT 0).
+- City has a real state signal (MENUCLOCK: game clock stopped) but it lags by seconds; the map opening needs an instant one.
+- Plan: engine-side menu/movie state (Scaleform movie open/close), then no doubled render + whole frame on the menu screen
+  while the map is up (playbook 17 #side-effect-gate, 04 "authoritative UI state", b955f224). HEADSET: pending.
+
+## MENUSTATE + UNPAUSECUT + WIPESOUND5 + MAPBLITTAIL (2026-10-11 ~22:40; JJ 22:16 run of the MAPBLIT build)
+JJ (HEADSET): (1) after closing the map, a flat 2D copy of the gameplay over the 3D for a couple of seconds where the map
+was; (2) unpausing plays a black screen + bat transition ("should just go straight back"; bats only when actually
+exiting); (3) the audio is gone after that transition.
+LIVE (batman_city.log 22:15-22:16): (1) MAPBLIT followed MAPSCREEN's 1.5 s hold after the map's last big shape (map
+detected 22:16:14, 5451 indices); (2) 22:16:36.462 "wipe starts (square: hidden, replayed, placement 0.189, menus)" ->
+recorded replay, held to the 4 s cap ("wipe replay ended after 4000 ms"), then WIPEREVEAL; the game clock ran again at
+36.821 (0.36 s after the wipe start) = unpause; (3) WIPESOUND learned Wwise event 2209210028 at the menu-open and
+map-open wipe starts (= the menu-open sound) and the reveal posted it in gameplay (22:16:40.465, object 60). The real
+bat sound is exact: 3904589100 = FNV-1("play_ui_fader_bats"), the event Origins plays by name.
+Looked up: MAPFLAT notes above; playbook b955f224 04 "authoritative UI state"; City re/natives.txt (2630 natives):
+UGFxMoviePlayer Start/Close/SetPause/SetFocus, ARPlayerController Get/SetActiveFocusMovie, IsPlayingFullScreenMovie,
+SetRegularGamePauseFlag; core pattern_scan find_native_function_ex (UE3 table, BioShock Infinite precedent).
+SOURCE (STATIC: Release built clean, installed 22:4x, SHA-256 5E1907AF2846D6B9..., backup
+backups\batman_city.dll.before-menustate in the game folder):
+- MENUSTATE probe (menu_state.cpp): 16 menu natives found by name in the live table (shared stubs skipped), hooked as
+  one batch on a worker thread; GNames found live ("None"/"ByteProperty"), object layout found from the first object.
+  Log "[bc] MENUSTATE <Class>.<Func> on <class> <object>" per call (first 80 each), getters only on change; status line;
+  `bc menuprobe` dumps counts. No behaviour change.
+- UNPAUSECUT (gfx_hud): game clock running again within 2 s of a menu-side replay start -> replay dropped, no reveal.
+  `bc unpausecut 0|1` (default 1). Status "UNPAUSECUT n".
+- WIPESOUND5 (scene.cpp): bat sound fixed at Play_UI_Fader_Bats; learning only logs. `bc wipesound learn 1` = old.
+- MAPBLITTAIL (gfx_hud): MAPBLIT only within `mapblithold` ms (250) of a map shape AND while the clock is stopped.
+  `bc mapblithold 0` = old 1.5 s behaviour.
+### TEST PLAN MS1 (one City launch, JJ drives, I watch the log)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 0 | launch VR, load into gameplay, "ready" | probe installed | log: "N of 16 menu natives hooked", "name table at ..." |
+| 1 | pause, wait 3 s, unpause | UNPAUSECUT + WIPESOUND5 | straight back to the game, no black/bats, audio stays; log "UNPAUSECUT"; MENUSTATE lines at pause / unpause |
+| 2 | open the map, look at the edges 10 s, close it | MAPBLITTAIL, MAPBLIT | no 2D gameplay after closing; JJ: copy outside the map window gone or not; MENUSTATE lines at open / close |
+| 3 | upgrades screen / other tabs, close | menu signal per screen | MENUSTATE names per screen |
+| 4 | pause -> quit to main menu | quit keeps its bats + sound | bats to black, reveal with the bat sound; no UNPAUSECUT |
+Follow-ups: (1) bats remain -> `bc unpausecut 0` A/B, then key it on the MENUSTATE unpause call; audio still lost ->
+`bc wipesound 0`; (2) copy remains -> MAPFLAT on the MENUSTATE map signal (next build); probe finds nothing (0 hooked)
+-> the table shape differs: dump strings around "UGFxMoviePlayerexecStart".
+### MS1 RESULTS (22:39-22:42, JJ HEADSET + LIVE)
+- HEADSET (JJ): "the flickering in the map screen and upgrade screen weren't there this time". Unpause: no bats reported
+  (7 unpauses). New: upgrade screen slow to open; after unpausing the HUD is "scaled down for about a second" then back.
+- LIVE: MENUSTATE 16/16 hooked; name table NOT found (searched 3 s after start; the 64 KB block skip also missed
+  region-crossing blocks). Signal per screen (every time the same):
+  pause open = RestoreMenuState, SaveMenuState, Start, SetFocus, RestoreMenuState, SetRegularGamePauseFlag (clock stops
+  ~50 ms later); pause close = game wipe starts (menus, placement 0.189), +340 ms SaveMenuState, Close,
+  SetRegularGamePauseFlag, Close, clock runs +30 ms. Map / upgrades open = Start + SetFocus (no menu-state calls), close =
+  Close. UNPAUSECUT fired on all 7 (359-422 ms). Upgrades opening replay "ended after 1875 ms" (recording + 700 ms hold;
+  the map ends it early via MAPSCREEN). HUD shrink: zones were off until pause_screen_now() (500 ms hold after the grey
+  pass) - the bat replay used to cover it.
+### MS2 (built + installed ~23:0x, SHA-256 F7D9500945D4E160..., backup backups\batman_city.dll.before-ms2)
+- menu_state: menu OPEN = Start + SetFocus on the same movie within 100 ms (not while the full-screen movie flag is TRUE),
+  CLOSED = its Close; pause-type when it calls RestoreMenuState; logged. Name table: page-by-page scan, ANSI or UTF-16,
+  retried every 5 s for 2 min.
+- scene.cpp MS2: HUD menu state from MENUSTATE (falls back to the grey pass without the probe); from a closing wipe that
+  starts inside an open menu (< 1 s) the HUD is the gameplay HUD again (`bc closezones 0|1`); stale safety: open menu
+  dropped after the clock has run 2.5 s. Pause halo off during the closing wipe.
+- gfx_hud: menu-opening hold 700 -> 250 ms (live: `bc menuhold N`).
+| # | JJ does | judge |
+|---|---|---|
+| 1 | pause / unpause x3 | HUD at its set size straight away; log "menu OPEN / CLOSED" pairs |
+| 2 | upgrades open / close x2 | opens quicker; any flicker at the opening? (I can set `bc menuhold 0 / 700` live) |
+| 3 | map open / close | still no copy, no 2D gameplay after closing |
+| 4 | quit to main menu | bats + sound |
+### MS2 RESULTS (22:51-22:53, JJ HEADSET + LIVE) -> the two leftovers are MS2 bugs
+- HEADSET: map / upgrades copy still gone ("at least we fixed the flickering outside the windows"); HUD still shrinks
+  after unpause; upgrades opening slow, "sometimes several seconds".
+- LIVE: names work (UTF-16 table at 016019C8): RGFxMovieUI_Pause, RGFxMovieBackScreen (map + upgrades), main-menu chain
+  RGFxMovieUI_*, HUD RGFxMovieHudExtendable. BUG 1: the stale safety measured from the last unpause, not from the
+  opening -> "1 open menu(s) dropped" right after most OPENs, so the closing-wipe HUD rule never ran. BUG 2: when the
+  menu state survived (BackScreen_2 / _4), menuUp made the opening wipe count as "menus" -> 4 s cap ("wipe replay ended
+  after 4000 ms") = the several seconds. Fix next: stale timer from max(opening, clock running); the opening wipe's
+  origin decided before the menu state (or menuUp ignored for the first 300 ms).
+- MS3 source (menu class per open menu, screen_menu_open) is in City's menu_state too; City not rebuilt yet.
+### MS9 (2026-10-12 ~00:0x; JJ: switch to City's two leftovers)
+- SOURCE scene.cpp: (1) stale safety counts from max(menu opening, clock running again) - MS2 dropped nearly every menu at
+  once; (2) a menu counts for the HUD from 300 ms after it opens, so the game's opening wipe (~40 ms after focus) still
+  starts "from gameplay" (MS2 made it in-menu = 4 s hold cap = "several seconds"); (3) "closing" lasts from the closing
+  wipe until the game runs again (also after the Close, capped 1.5 s) so the HUD does not blink small between Close and
+  the clock. menu_state also carries the MS3-MS8 changes (group close, map-type screen signal, fallback routes - City
+  still uses its name table).
+- STATIC: Release built clean, installed 483A3DB201A9CD80..., backup backups\batman_city.dll.before-ms9. Not run.
+| # | JJ does | judge |
+|---|---|---|
+| 1 | pause / unpause x3 | HUD at its set size straight away; log "menu CLOSED" without "dropped" before it |
+| 2 | upgrades open / close x3 | quick each time; log "wipe starts (... gameplay)" + "replay ended after ~1422 ms", never 4000 |
+| 3 | map open / close | still clean, no 2D after |
+| 4 | quit to main menu | bats + sound |
+### MS9 RESULTS (16:28-16:29 on 2026-10-12, JJ HEADSET + LIVE) -> MS10 HUDTRACE
+- HEADSET: upgrades "slightly faster"; after unpause the HUD "is still scaled down and then scales up quickly ... maybe
+  it's got nothing to do with my personal adjustments".
+- LIVE: menu state exact (no "dropped"); upgrades openings 1422-1437 ms every time (recording 1172 + hold 250; never 4000).
+  Pause close: wipe +330 ms Close, +48 ms clock - zones were on from the closing wipe, yet JJ still sees the shrink =>
+  probably NOT zones: suspect the game's own HUD grow-in after unpausing (formerly hidden under the 4 s bat replay).
+- Looked up again (2 failed attempts): our notes + memory for HUD grow / scale-in / animate after pause: nothing.
+- SOURCE MS10 HUDTRACE: 2 s from each pause menu's closing wipe, a line per present (zones flag, HUD pieces' own placement
+  scale as the game sets it: largest / mean) + every 12th HUD sheet saved to captures\hudtrace_<t>\ (4 traces per run).
+  Installed 448269E0F15C7B0B..., backup backups\batman_city.dll.before-hudtrace.
+- Judge: game placement growing over ~0.5-1 s with zones 1 = the game's own animation -> fix by holding the last
+  pre-pause HUD sheet until the game's scale settles (or skip the scale-in); zones 0 while small = ours.
+- Option for upgrades: `bc menuhold 0` (live) drops the extra 250 ms.
+### MS10 HUDTRACE RESULTS (16:38-16:39, 4 unpauses) -> MS11
+- HEADSET (JJ): "My HUD size ... is 88 degrees, but when it unpauses it feels like ... 70 or less".
+- LIVE (HUDTRACE, trace 4): +0 ms 10 pause pieces (placement 0.189); +297 ms none; +406 ms (just after the Close) 109
+  gameplay HUD pieces at their normal placement (largest 1.11e-4, constant to +2000 ms); zones 1 the whole time. => the
+  game does NOT grow the HUD and our zones were on: the shrink is the HEADSET PANEL. Menu panel = 5.73 m at the menu
+  distance (~71 deg) vs the HUD's 88 deg. menuNow also holds for 12 presents after the pause screen's grey pass
+  (room_overlay note_hud_menu, HUDMENU), and that pass keeps drawing while it fades after the menu closes.
+- SOURCE MS11: openxr_runtime set_hud_menu_hint(ok) - the grey-pass hint only counts while the game's own calls say a
+  menu is open and not closing (scene.cpp, MENUSTATE live); without the probe it behaves as before. Built clean, installed
+  A509488AEE77D3A9..., backup backups\batman_city.dll.before-ms11. Not run.
+- Judge: after unpause the HUD stays at 88 deg (JJ); HUDTRACE lines unchanged.
+### MS11 RESULT + PACKAGE 0.1.3 (2026-10-12; JJ: "much better ... good enough to package up and ship ... all the settings
+saved and any other probes and tests and unused code cleaned up"; NOT published)
+- HEADSET (JJ): MS11 fixed the HUD shrink after unpause ("much better"); upgrades opening ~1.4 s.
+- Removed (tests / probes): HUDTRACE; LEAKTRACE + MAPTRACE recorder and its MAIN-panel button; the "Map: eyes black" test
+  checkbox and MAPBLIT setters (MAPBLIT fixed on); MAPTEST (0.1.2 test-options button, steps, command); the menu probe's
+  per-call logging, dump and fallback routes (City keeps the name-table route, 5 functions: Start, Close, SetFocus,
+  IsPlayingFullScreenMovie, RestoreMenuState; menu_state.cpp 719 -> 303 lines); WIPESOUND learning (fixed
+  Play_UI_Fader_Bats); A/B switches closezones / unpausecut / mapblithold / wipesound learn / menuprobe / maptrace /
+  maptest / mapblit. Kept: menu signal, UNPAUSECUT, MAPBLIT + MAPBLITTAIL, MS2/MS9 closing HUD, MS11 panel hint, bat sound.
+  Origins keeps its own (unchanged) menu_state copy with the fallback routes - the two copies are no longer synced.
+- SAVEALL: a settings file that is not exactly the current set is rewritten once at start (JJ's file lacked
+  marker_upright / marker_face, both default 1 = what he ran).
+- tools/make_package.py compares against build/src/Release (the configuration installed), not RelWithDebInfo.
+- STATIC: Release built clean, installed DB8E97627EDF2C47... (backup backups\batman_city.dll.before-cleanup); JJ's
+  settings.ini backed up to the scratchpad. dist/BatmanCityVR-ArkhamCity.zip 117 files, 290.5 MB, sha256 ac8bdf21...;
+  zip dll = installed dll; settings = JJ's (hud_size_m 7.726 = 88 deg at 4 m, first_person=0 for new players); Windows
+  tar lists 117 entries. Installer / uninstaller unchanged since 0.1.2 (its practice run stands). The cleaned build has
+  NOT been run in the game yet.

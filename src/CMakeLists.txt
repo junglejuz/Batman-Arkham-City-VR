@@ -66,6 +66,8 @@ add_library(batman_city SHARED
     game/arkhamcity/dlss_bridge.cpp
     game/arkhamcity/dlss_bridge.h
     game/arkhamcity/markers.cpp
+    game/arkhamcity/menu_state.cpp
+    game/arkhamcity/menu_state.h
     game/arkhamcity/markers.h
     game/arkhamcity/reflect.cpp
     game/arkhamcity/reflect.h

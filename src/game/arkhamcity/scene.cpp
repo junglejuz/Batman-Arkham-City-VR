@@ -17,6 +17,7 @@
 #include "game/arkhamcity/glow.h"
 #include "game/arkhamcity/dlss_bridge.h"
 #include "game/arkhamcity/markers.h"
+#include "game/arkhamcity/menu_state.h"
 #include "game/arkhamcity/reflect.h"
 #include "game/arkhamcity/room_overlay.h"
 #include "game/arkhamcity/screen_hd.h"
@@ -353,6 +354,8 @@ void save_capture() {
             fprintf(f, "%s\n", ro);
             reflect::status_line(ro, sizeof(ro));
             fprintf(f, "%s\n", ro);
+            menu_state::status_line(ro, sizeof(ro));
+            fprintf(f, "%s | UNPAUSECUT %u\n", ro, bvr::gfx_hud::unpause_cuts());
             dlss_bridge::status_line(ro, sizeof(ro));
             fprintf(f, "%s\n", ro);
             fprintf(f, "BILLBOARD on %d: particle axes patched %u | BATCUTS on %d: cut pieces kept in the eye %u\n",
@@ -927,58 +930,7 @@ uint32_t __fastcall begin_exec_detour(void* self, void* edx) {
     return g_beginExecOrig(self, edx);
 }
 
-// MAPTEST (JJ 2026-10-10: the map shows its text but not the city - "it used to work ... maybe before DLSS"; JJ cannot
-// report live from the headset): one button starts it, JJ opens the map and waits. After 15 s each suspect is switched
-// off for 6 s on its own, a capture is saved 3 s in, then it is switched back; the captures say which one brings the map
-// back. BATMAN_CITY_PLAN.md "TEST PLAN MAP3".
-struct MapStep { const char* name; const char* on; const char* off; };
-const MapStep kMapSteps[] = {
-    {"baseline (nothing changed)", nullptr, nullptr},
-    {"HUD's own depth-stencil off (HUDDSV)", "huddsv 0", "huddsv 1"},
-    {"FXAA replacement off (NOFXAA)", "vis nofxaa 0", "vis nofxaa -1"},
-    {"menu-wipe hiding off (HIDEWIPES)", "hidewipes 0", "hidewipes 1"},
-    {"two-eye drawing off", "stereo off", "stereo on"},
-    {"VR camera off", "cam off", "stereo on"},
-    {"16:9 widening off", "fullrect off", "fullrect on"},
-};
-std::atomic<ULONGLONG> g_mapTestStart{0};
-int g_mapTestStep = -1, g_mapTestPhase = 0;
-void map_test_tick() {
-    const ULONGLONG t0 = g_mapTestStart.load(std::memory_order_relaxed);
-    if (!t0) return;
-    constexpr ULONGLONG kLead = 15000, kStep = 6000;
-    const ULONGLONG now = GetTickCount64();
-    if (now < t0 + kLead) return;
-    const int n = int(sizeof(kMapSteps) / sizeof(kMapSteps[0]));
-    const int step = int((now - t0 - kLead) / kStep);
-    const ULONGLONG in = (now - t0 - kLead) % kStep;
-    if (step != g_mapTestStep) { // leave the previous step, enter this one
-        if (g_mapTestStep >= 0 && g_mapTestStep < n && kMapSteps[g_mapTestStep].off) handle_command(kMapSteps[g_mapTestStep].off);
-        g_mapTestStep = step;
-        g_mapTestPhase = 0;
-        if (step >= n) {
-            g_mapTestStart.store(0);
-            g_mapTestStep = -1;
-            BVR_LOG("[bc] MAPTEST done - everything switched back");
-            return;
-        }
-        BVR_LOG("[bc] MAPTEST step %d of %d: %s", step + 1, n, kMapSteps[step].name);
-        if (kMapSteps[step].on) handle_command(kMapSteps[step].on);
-    }
-    if (g_mapTestPhase == 0 && in >= 3000) {
-        g_mapTestPhase = 1;
-        BVR_LOG("[bc] MAPTEST step %d capture (%s)", step + 1, kMapSteps[step].name);
-        g_captureReq.store(true);
-    }
-}
-void start_map_test() {
-    g_mapTestStep = -1;
-    g_mapTestStart.store(GetTickCount64());
-    BVR_LOG("[bc] MAPTEST armed: open the map now; steps start in 15 s (7 steps x 6 s, captures 3 s into each)");
-}
-
-void __fastcall draw_detour(void* self, void* edx, uint32_t a1) {
-    const uint32_t ra = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(_ReturnAddress()));
+void __fastcall draw_detour(void* self, void* edx, uint32_t a1) {    const uint32_t ra = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(_ReturnAddress()));
     if (g_depth > 0) { // nested (should not happen) - pass straight through
         g_drawOrig(self, edx, a1);
         return;
@@ -1030,7 +982,6 @@ void __fastcall draw_detour(void* self, void* edx, uint32_t a1) {
             g_captureReq.store(true);
         }
     }
-    map_test_tick(); // MAPTEST: may request a capture just below
     if (g_captureReq.exchange(false)) save_capture();
 
     // Gate both tags and the doubling identically so they can never go one-sided.
@@ -1142,6 +1093,7 @@ void watch_clocks(const void* family) {
     }
     g_clockFields.store(clocks, std::memory_order_relaxed);
     const bool paused = running > 0 && stopped > 0;
+    bvr::gfx_hud::set_clock_stopped(paused); // MAPBLITTAIL + UNPAUSECUT
     if (paused != g_gamePaused.exchange(paused))
         BVR_LOG("[bc] game clock %s (clock fields %d, running %d, stopped %d)", paused ? "STOPPED - in a menu" : "running",
                 clocks, running, stopped);
@@ -1164,108 +1116,20 @@ using AkPostEventFn = uint32_t(__cdecl*)(uint32_t eventId, uint32_t gameObject, 
 AkPostEventFn g_akPostOrig = nullptr;
 constexpr uintptr_t kAkPostEvent = 0x1056BD0;
 SRWLOCK g_soundLock = SRWLOCK_INIT;
-struct AkSeen { uint32_t id, obj; ULONGLONG ms; uint32_t posts; bool nearWipe; };
-AkSeen g_akSeen[256] = {};
-int g_akSeenN = 0;
-uint32_t g_akRecentId[32] = {}, g_akRecentObj[32] = {};
-ULONGLONG g_akRecentMs[32] = {};
-int g_akRecentN = 0;
-uint32_t g_wipeSoundId = 0, g_newestObj = 0;
-// WIPESOUND4 (log 04:25:08: at the quit wipe's start the game posted 990593514 / 3809399880 (15 ms before) and 3904589100
-// (0 ms); the "not common" rule threw them out because the bat sound plays at EVERY bat wipe, e.g. opening the pause
-// menu). Now: each event posted within 60 ms of a game wipe start (event 2) scores one point per wipe; the bat sound =
-// the event at the most wipe starts (ties: the one nearest the start).
-struct WipeScore { uint32_t id, wipes, lastWipe; uint32_t bestDt; };
-WipeScore g_wipeScore[64] = {};
-int g_wipeScoreN = 0;
-uint32_t g_wipeSerial = 0;
-ULONGLONG g_wipeStartMs = 0;
-void wipe_score(uint32_t id, uint32_t dt) { // under g_soundLock
-    WipeScore* w = nullptr;
-    for (int i = 0; i < g_wipeScoreN; ++i)
-        if (g_wipeScore[i].id == id) w = &g_wipeScore[i];
-    if (!w && g_wipeScoreN < 64) { w = &g_wipeScore[g_wipeScoreN++]; *w = WipeScore{id, 0, 0, 999}; }
-    if (!w || w->lastWipe == g_wipeSerial) return;
-    w->lastWipe = g_wipeSerial;
-    ++w->wipes;
-    if (dt < w->bestDt) w->bestDt = dt;
-    const WipeScore* best = nullptr;
-    for (int i = 0; i < g_wipeScoreN; ++i) {
-        const WipeScore& c = g_wipeScore[i];
-        if (!best || c.wipes > best->wipes || (c.wipes == best->wipes && c.bestDt < best->bestDt)) best = &c;
-    }
-    if (best && best->id != g_wipeSoundId) {
-        g_wipeSoundId = best->id;
-        BVR_LOG("[bc] WIPESOUND: the bat sound = Wwise event %u (at %u game wipe starts, %u ms from the start)", best->id,
-                best->wipes, best->bestDt);
-    }
-}
-ULONGLONG g_quitWipeMs = 0;
+// WIPESOUND5 (JJ 2026-10-11 22:16: after the unpause bat transition the audio was gone - the learning had picked the
+// menu-open sound, 2209210028, and the reveal posted it in gameplay). The bat sound is exact: 3904589100 = FNV-1 hash of
+// "play_ui_fader_bats" (Origins posts Play_UI_Fader_Bats by name). The reveal posts it on the newest game object.
+constexpr uint32_t kBatSoundId = 3904589100u; // Play_UI_Fader_Bats
+uint32_t g_wipeSoundId = kBatSoundId, g_newestObj = 0;
 std::atomic<bool> g_playWipeSound{false}, g_wipeSoundOn{true};
-std::atomic<uint32_t> g_akLogged{0};
-AkSeen* ak_seen(uint32_t id) { // under g_soundLock
-    for (int i = 0; i < g_akSeenN; ++i)
-        if (g_akSeen[i].id == id) return &g_akSeen[i];
-    if (g_akSeenN >= 256) return nullptr;
-    g_akSeen[g_akSeenN] = AkSeen{id, 0, 0, 0, false};
-    return &g_akSeen[g_akSeenN++];
-}
-// The wipe's sound from the recent events around the wipe start t (under g_soundLock): not common = never posted far
-// from a wipe.
-void ak_learn(ULONGLONG t, const char* when) {
-    for (int k = 0; k < 32 && k < g_akRecentN; ++k) {
-        const int i = (g_akRecentN - 1 - k) & 31;
-        const ULONGLONG ms = g_akRecentMs[i];
-        if (ms + 1500 < t || ms > t + 600) continue;
-        const AkSeen* s = ak_seen(g_akRecentId[i]);
-        if (!s || s->posts > 1 && !s->nearWipe) continue; // a menu click / music: also posted without a wipe
-        if (g_wipeSoundId != g_akRecentId[i]) {
-            g_wipeSoundId = g_akRecentId[i];
-            BVR_LOG("[bc] WIPESOUND: the wipe's sound = Wwise event %u (game object %u, %lld ms from the wipe start, %s)",
-                    g_wipeSoundId, g_akRecentObj[i], (long long)ms - (long long)t, when);
-        }
-        return;
-    }
-}
 uint32_t __cdecl ak_post_detour(uint32_t id, uint32_t obj, uint32_t flags, void* cb, void* cookie, void* ext) {
-    const ULONGLONG now = GetTickCount64();
-    bool logIt = false;
     AcquireSRWLockExclusive(&g_soundLock);
-    const bool nearWipe = g_quitWipeMs && now + 1500 >= g_quitWipeMs && now <= g_quitWipeMs + 600;
-    if (AkSeen* s = ak_seen(id)) {
-        if (!nearWipe && s->posts && now - s->ms > 1500) s->nearWipe = false; // posted again on its own: common
-        if (!s->posts) s->nearWipe = nearWipe;
-        ++s->posts;
-        s->ms = now;
-        s->obj = obj;
-    }
-    const int i = g_akRecentN++ & 31;
-    g_akRecentId[i] = id; g_akRecentObj[i] = obj; g_akRecentMs[i] = now;
     g_newestObj = obj;
-    if (g_wipeStartMs && now <= g_wipeStartMs + 60) wipe_score(id, uint32_t(now - g_wipeStartMs));
-    logIt = false; // per-event logging was a probe (WIPESOUND 1-3); the learned event is logged by wipe_score
     ReleaseSRWLockExclusive(&g_soundLock);
-    if (logIt && g_akLogged.fetch_add(1, std::memory_order_relaxed) < 80)
-        BVR_LOG("[bc] Wwise event %u on object %u%s", id, obj, nearWipe ? " (at the wipe start)" : "");
     return g_akPostOrig(id, obj, flags, cb, cookie, ext);
 }
-void wipe_sound_event(int kind) { // render thread (gfx_hud)
-    const ULONGLONG now = GetTickCount64();
-    AcquireSRWLockExclusive(&g_soundLock);
-    if (kind == 0) {
-        g_quitWipeMs = now;
-    } else if (kind == 2) {
-        g_wipeStartMs = now;
-        ++g_wipeSerial;
-        for (int k = 0; k < 32 && k < g_akRecentN; ++k) {
-            const int i = (g_akRecentN - 1 - k) & 31;
-            if (g_akRecentMs[i] + 60 >= now) wipe_score(g_akRecentId[i], uint32_t(now - g_akRecentMs[i]));
-        }
-    } else if (kind == 1) {
-        if (g_wipeSoundId && g_wipeSoundOn.load(std::memory_order_relaxed)) g_playWipeSound.store(true);
-        else BVR_LOG("[bc] WIPESOUND: reveal without sound (%s)", g_wipeSoundId ? "switched off" : "no wipe sound heard yet");
-    }
-    ReleaseSRWLockExclusive(&g_soundLock);
+void wipe_sound_event(int kind) { // render thread (gfx_hud): 1 = the reveal starts
+    if (kind == 1 && g_wipeSoundOn.load(std::memory_order_relaxed)) g_playWipeSound.store(true);
 }
 void play_wipe_sound_now() { // game thread
     AcquireSRWLockExclusive(&g_soundLock);
@@ -1295,13 +1159,40 @@ void* __fastcall calc_detour(void* self, void* edx, void* family, float* loc, in
     {   // MENUCLOCK: HUD groups only in gameplay; menus, the map and the title screen take the menu panel size
         const bool title = room_overlay::title_screen_now();
         const bool paused = g_gamePaused.load(std::memory_order_relaxed);
+        // MS2 (JJ 2026-10-11 22:41: after unpausing "the HUD elements are scaled down for about a second and then they
+        // scale back out"; the old unpause bat replay used to cover it). LIVE 22:40: the pause screen's grey pass held
+        // "menu" 500 ms past the menu's Close, which comes ~340 ms after its closing wipe starts. The game's own calls
+        // (MENUSTATE) say when a menu opens and closes: the menu counts from its opening to its Close, and from the moment
+        // its closing wipe starts the HUD is the gameplay HUD again (`bc closezones 0` = only from the Close).
+        const ULONGLONG nowMs = GetTickCount64();
+        static ULONGLONG s_runningSince = 0;
+        if (paused) s_runningSince = 0; else if (!s_runningSince) s_runningSince = nowMs;
+        const bool probe = menu_state::live();
+        // MS9 (MS2 RESULTS 22:51: the safety dropped almost every menu the moment it opened - it counted from the last
+        // unpause, minutes earlier - so the closing-wipe rule never ran and the HUD still shrank). It counts from the later
+        // of the menu's opening and the clock running again.
+        const ULONGLONG openAt = menu_state::menu_open_at();
+        const ULONGLONG runFrom = s_runningSince > openAt ? s_runningSince : openAt;
+        if (probe && menu_state::menu_open() && s_runningSince && nowMs - runFrom > 2500)
+            menu_state::clear_stale("the game has run for 2.5 s"); // a missed Close must not keep the menu state
+        // MS9 (JJ: the upgrades screen "sometimes takes several seconds"; LIVE 22:52:53 / 22:53:07: the game's opening wipe
+        // starts ~40 ms after the menu takes focus; counting the menu at once made that wipe an in-menu one = the 4 s hold
+        // cap). A menu counts for the HUD from 300 ms after it opens; its opening wipe still starts "from gameplay".
+        const bool menuUp = probe ? (menu_state::menu_open() && nowMs - openAt >= 300) : room_overlay::pause_screen_now();
+        const ULONGLONG wipeAt = bvr::gfx_hud::menu_wipe_at();
+        // From the closing wipe's start until the game runs again (the Close comes ~340 ms after the wipe, the clock
+        // ~30-90 ms after the Close) - capped at 1.5 s.
+        const bool closing = probe && wipeAt > openAt &&
+                             nowMs - wipeAt < 1500 && (menu_state::menu_open() || menu_state::menu_closed_at() >= wipeAt);
+        const bool gameplayHud = (closing || (!paused && !menuUp)) && !title && !movie_playing_now();
         // HIDEWIPES: the pause screen's own grey pass counts at once (the clock signal can lag).
-        bvr::gfx_hud::set_hud_zones_gameplay(!paused && !room_overlay::pause_screen_now() && !title && !movie_playing_now());
-        bvr::vr::set_hud_menu_now(paused || title);
+        bvr::gfx_hud::set_hud_zones_gameplay(gameplayHud);
+        bvr::vr::set_hud_menu_now(((paused || menuUp) && !closing) || title);
+        bvr::vr::set_hud_menu_hint(!probe || (menu_state::menu_open() && !closing)); // MS11
         // WIPEMAIN: the pause menu's pieces sit at the main menu's placement (~1.9), so the wipe logic needs this too.
         bvr::gfx_hud::set_main_menu_now(title && !paused && !room_overlay::pause_screen_now());
         // PAUSEHALO: the pause screen's own grey pass shows at once; the clock signal lags it by seconds (run 32: 7 s).
-        const bool pauseScreen = paused || room_overlay::pause_screen_now();
+        const bool pauseScreen = (paused || room_overlay::pause_screen_now()) && !closing;
         bvr::gfx_hud::set_halo(pauseScreen && !title ? g_pauseHalo.load(std::memory_order_relaxed) : 0.0f);
     }
     if (g_playWipeSound.exchange(false)) play_wipe_sound_now(); // WIPESOUND
@@ -1764,7 +1655,9 @@ void settings_load() {
             if (!strncmp(vl, "settings_version=", 17)) version = atoi(vl + 17);
         rewind(f);
     }
+    std::string raw; // SAVEALL: the file as it was, to see whether it holds every current setting
     while (fgets(line, sizeof(line), f)) {
+        raw += line;
         char* eq = strchr(line, '=');
         if (line[0] == ';' || !eq) continue;
         *eq = 0;
@@ -1840,8 +1733,12 @@ void settings_load() {
     if (pd > 0.1f && pw > 0.1f) bvr::vr::set_panel_size(pw, pd);
     if (asym >= 0) bvr::vr::set_asym_fov(asym != 0);
     set_ipd_tag();
-    g_settingsSaved = settings_text();
-    BVR_LOG("[bc] settings: %d loaded from %ls", n, path);
+    // SAVEALL (2026-10-12, packaging: JJ "make sure all the settings are saved"): the file was only written on a change,
+    // so settings added in a newer build (marker_upright / marker_face) never reached it. A file that is not exactly
+    // the current set is rewritten once, half a second after the start (settings_tick), with every setting in it.
+    const std::string now = settings_text();
+    g_settingsSaved = raw == now ? now : std::string();
+    BVR_LOG("[bc] settings: %d loaded from %ls%s", n, path, raw == now ? "" : " - rewriting it with every current setting");
 }
 
 // Game thread, every frame; does real work at most 4x a second.
@@ -1946,6 +1843,7 @@ bool install() {
     bvr::frame_inspector::set_draw_skip(&grunge_skip);
     bvr::frame_inspector::set_cb_shadow(true); // MARKEREYE reads each HUD piece's placement
     reflect::install();                         // REFLECTEYE: the reflection capture renders for each eye
+    menu_state::install();                      // MENUSTATE probe: the game's own menu calls, logged by name
     dlss_bridge::install();                     // DLSS hand-off to the 64-bit helper (off until switched on)
     afw::install();                             // AFW: the core asks it for the undrawn eye (off until chosen)
     bvr::gfx_hud::set_before_capture_hook(&screen_hd::logo_frame); // HD LOGO: HD title / tech cards over the logo video
@@ -2018,7 +1916,7 @@ bool handle_command(const char* args) {
     else if (starts("wipesound id ")) { AcquireSRWLockExclusive(&g_soundLock); g_wipeSoundId = uint32_t(strtoul(args + 13, nullptr, 10)); ReleaseSRWLockExclusive(&g_soundLock); BVR_LOG("[bc] WIPESOUND: event set to %s", args + 13); }
     else if (starts("wipesound ")) { g_wipeSoundOn.store(atoi(args + 10) != 0); BVR_LOG("[bc] WIPESOUND %s", g_wipeSoundOn.load() ? "on" : "off"); }
     else if (starts("wipedebug ")) bvr::gfx_hud::set_wipe_debug(atoi(args + 10) != 0); // auto captures 0.4 s into wipe replays
-    else if (starts("hidewipes ")) { bvr::gfx_hud::set_hide_wipes(atoi(args + 10) != 0); BVR_LOG("[bc] hide menu wipes %d (MAPTEST)", atoi(args + 10)); }
+    else if (starts("hidewipes ")) { bvr::gfx_hud::set_hide_wipes(atoi(args + 10) != 0); BVR_LOG("[bc] hide menu wipes %d", atoi(args + 10)); }
     else if (starts("hd ")) screen_hd::command(args + 3); // HD SCREENS
     else if (starts("afw ")) { if (!afw::command(args + 4)) BVR_LOG("[bc] afw: on|off|mode N|win N|dbg N|feather N|log N|status"); }
     else if (starts("dlss0 on")) dlss_bridge::set_enabled(true);
@@ -2033,7 +1931,6 @@ bool handle_command(const char* args) {
     else if (starts("vis")) vision::handle_command(args[3] ? args + 4 : "");
     else if (starts("recenter")) g_recenterReq.store(true);
     else if (starts("capture")) g_captureReq.store(true);
-    else if (starts("maptest")) start_map_test();
     else if (starts("grunge game")) room_overlay::set_mode(room_overlay::kOriginal);
     else if (starts("grunge room")) room_overlay::set_mode(room_overlay::kRoom);
     else if (starts("grunge hide")) room_overlay::set_mode(room_overlay::kHidden);
@@ -2075,6 +1972,8 @@ bool handle_command(const char* args) {
         BVR_LOG("[bc] HUD group %d: size %.2f offset %.2f, %.2f", z, zs, zx, zy);
     }
     else if (starts("aimdepth ")) { markers::settings_read("aim_depth", args + 9); BVR_LOG("[bc] aim depth %s", args + 9); }
+    else if (starts("markerupright ")) { markers::settings_read("marker_upright", args + 14); BVR_LOG("[bc] upright marker card %s", args + 14); }
+    else if (starts("markerface ")) { markers::settings_read("marker_face", args + 11); BVR_LOG("[bc] marker card faces the game camera %s", args + 11); }
     else if (starts("aimnopass ")) { markers::settings_read("aim_nopass", args + 10); BVR_LOG("[bc] aim depth without the pass %s", args + 10); }
     else if (starts("hudfx on")) bvr::gfx_hud::set_fx_passthrough(true);
     else if (starts("hudfx off")) bvr::gfx_hud::set_fx_passthrough(false);
@@ -2140,12 +2039,6 @@ void draw_ui() {
     ImGui::SameLine();
     if (ImGui::Button(g_camera.load() ? "Head tracking: ON  (F11)" : "Head tracking: OFF  (F11)")) {
         if (g_camera.load()) set_camera(false); else set_stereo(true);
-    }
-    if (g_mapTestStart.load()) {
-        ImGui::TextColored(kAmber, "Map test running - keep the map open (about %llu s left)",
-                           (g_mapTestStart.load() + 15000 + 7 * 6000 - (std::min)(GetTickCount64(), g_mapTestStart.load() + 57000)) / 1000);
-    } else if (bvr::overlay::show_tests() && ImGui::Button("Map test: press, close this panel, open the map, wait 1 minute")) {
-        start_map_test();
     }
     ImGui::TextDisabled("controller: left stick / d-pad = move, A = select / change, B = back, both stick clicks = close");
 

@@ -89,6 +89,10 @@ void set_wipe_reveal(bool on); // WIPEREVEAL: bats clear off the arriving screen
 void set_pre_reveal(int ms);  // PREREVEAL: the reveal starts this long after loading goes quiet (default 500)
 void set_wipe_reveal_skip(int ms); // WIPEREVEAL: start that far into the recording (default 300)
 void set_glow_zone(int mode); // GLOWZONE / PICZONE: 0 anchor only, 1 glow pastes, 2 picture middle (default), 3, 4
+// The adapter's game-clock verdict (menus / map stop it). Stopped -> running also feeds UNPAUSECUT.
+void set_clock_stopped(bool stopped);
+uint32_t unpause_cuts();
+unsigned long long menu_wipe_at(); // MS2: GetTickCount64 of the last wipe that started inside the menus
 void set_map_screen(bool on); // MAPSCREEN: big untextured shapes = the map: wipe hiding paused (default on)
 void set_stage_box(bool on); // STAGEBOX / FIRSTCUT / FADESKIP (default on)
 void set_menu_cut(bool on); // MENUCUT test: outside gameplay every cut-type piece stays in the eye image

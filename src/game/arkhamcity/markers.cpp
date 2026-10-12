@@ -30,6 +30,15 @@ std::atomic<int> g_lag{0};
 // GAME camera at its object's distance, seen from each eye; false = flat in each eye's picture (facing
 // the eye, turning and rolling with the head).
 std::atomic<bool> g_card{true};
+// MARKERUPRIGHT (JJ 2026-10-11: "the RB icon next to the grappling hook reticle rotates a little bit with your head
+// movements"; port of AKN MKUPRIGHT + MKGS, VR_WORLD_MARKERS_GUIDE §5a/§5b): the MARKERCARD card leaned back with the
+// camera (plane at the object's base depth) and was moved AFFINELY (first-order), so off-centre pieces such as the RB
+// prompt swung on head turns. Now the card stands upright (normal = camera heading, up = world up) and every vertex is
+// placed in exact perspective: City's Scaleform vertex shader uses all four cb0 columns (the pause menu is a perspective
+// movie, capture 191956), so the homography goes straight into cb0 - no geometry shader needed.
+std::atomic<bool> g_upright{true};
+// MARKERFACE: the upright card tilts to face the game camera's position (see upright_card).
+std::atomic<bool> g_face{true};
 
 // --- per-frame marker sets (game thread writes, render thread reads) -------------------------
 constexpr int kMaxPts = 16;
@@ -63,7 +72,7 @@ uint32_t g_baseFrame = 0xFFFFFFFF;
 // --- counters -----------------------------------------------------------------------------------
 std::atomic<uint32_t> g_projects{0}, g_forced{0}, g_pieces{0}, g_lastPieces{0}, g_noPass{0};
 std::atomic<float> g_lastDx{0}, g_lastDy{0};
-std::atomic<uint32_t> g_cards{0};
+std::atomic<uint32_t> g_cards{0}, g_uprights{0}, g_uprightFails{0}, g_faced{0};
 
 // --- render thread: the cb0 to put back after a moved draw ------------------------------------
 ID3D11Buffer* g_patchedBuf = nullptr;
@@ -103,6 +112,84 @@ bool project(const float vp[16], const float w[3], float out[4]) {
     out[1] = c[1] / c[3];
     out[2] = c[2] / c[3];
     out[3] = c[3];
+    return true;
+}
+
+// MARKERUPRIGHT: an upright card at W, the size the game laid the marker out at, seen from this eye. Returns the map
+// from a reference-picture point (NDC, y up; the head-free game camera's picture) to this eye's clip space,
+// clip = K0 + x*Kx + y*Ky - exact perspective (a plane maps linearly to clip space).
+bool upright_card(const float bVp[16], const float eVp[16], const float W[3], float rx, float ry, float K0[4], float Kx[4],
+                  float Ky[4]) {
+    // Gradients of the base clip x / y / w over world position = P00 * camera right, P11 * camera up, camera forward
+    // (the base lens is symmetric).
+    const float gx[3] = {bVp[0], bVp[4], bVp[8]}, gy[3] = {bVp[1], bVp[5], bVp[9]}, gw[3] = {bVp[3], bVp[7], bVp[11]};
+    const float p00 = sqrtf(gx[0] * gx[0] + gx[1] * gx[1] + gx[2] * gx[2]);
+    const float p11 = sqrtf(gy[0] * gy[0] + gy[1] * gy[1] + gy[2] * gy[2]);
+    const float fl = sqrtf(gw[0] * gw[0] + gw[1] * gw[1] + gw[2] * gw[2]);
+    const float hl = sqrtf(gw[0] * gw[0] + gw[1] * gw[1]);
+    if (!(p00 > 1e-6f) || !(p11 > 1e-6f) || !(hl > 0.2f * fl)) return false; // looking almost straight up or down
+    // Card axes: right = horizontal, perpendicular to the heading (sign: the game view's right); up = world up (UE3 +Z).
+    float right[3] = {gw[1] / hl, -gw[0] / hl, 0.0f};
+    if (right[0] * gx[0] + right[1] * gx[1] < 0.0f) { right[0] = -right[0]; right[1] = -right[1]; }
+    float up[3] = {0.0f, 0.0f, gy[2] >= 0.0f ? 1.0f : -1.0f};
+    // World units per reference NDC unit at W's depth (the game's own layout scale there).
+    const float bw = W[0] * gw[0] + W[1] * gw[1] + W[2] * gw[2] + bVp[15];
+    if (!(bw > 1e-3f)) return false;
+    float sx = bw / p00, sy = bw / p11;
+    // MARKERFACE (JJ 2026-10-11: "shouldn't the markers and the reticles face the camera rather than ... facing straight
+    // out like the rest of the HUD?"): the card tilts to face the GAME camera's position (head-free, so head moves still
+    // change nothing); its right edge stays level (no roll). Size fitted so the game camera sees exactly the game's layout.
+    if (g_face.load(std::memory_order_relaxed)) {
+        // Camera position: where base clip x, y and w are all zero.
+        const float* a = gx; const float* b = gy; const float* c = gw;
+        const float bc[3] = {b[1] * c[2] - b[2] * c[1], b[2] * c[0] - b[0] * c[2], b[0] * c[1] - b[1] * c[0]};
+        const float ca[3] = {c[1] * a[2] - c[2] * a[1], c[2] * a[0] - c[0] * a[2], c[0] * a[1] - c[1] * a[0]};
+        const float ab[3] = {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+        const float det = a[0] * bc[0] + a[1] * bc[1] + a[2] * bc[2];
+        if (fabsf(det) > 1e-12f) {
+            const float r0 = -bVp[12], r1 = -bVp[13], r2 = -bVp[15];
+            float n[3];
+            for (int i = 0; i < 3; ++i) n[i] = (r0 * bc[i] + r1 * ca[i] + r2 * ab[i]) / det - W[i]; // W -> camera
+            const float nl = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+            const float nh = sqrtf(n[0] * n[0] + n[1] * n[1]);
+            if (nl > 1e-3f && nh > 0.2f * nl) { // not with the camera almost straight above / below the marker
+                for (int i = 0; i < 3; ++i) n[i] /= nl;
+                float rt[3] = {-n[1] / (nh / nl), n[0] / (nh / nl), 0.0f};
+                if (rt[0] * gx[0] + rt[1] * gx[1] < 0.0f) { rt[0] = -rt[0]; rt[1] = -rt[1]; }
+                float u[3] = {n[1] * rt[2] - n[2] * rt[1], n[2] * rt[0] - n[0] * rt[2], n[0] * rt[1] - n[1] * rt[0]};
+                if (u[2] < 0.0f) { u[0] = -u[0]; u[1] = -u[1]; u[2] = -u[2]; }
+                // Base NDC change per world unit along each axis at W.
+                const float cx = W[0] * gx[0] + W[1] * gx[1] + W[2] * gx[2] + bVp[12];
+                const float cy = W[0] * gy[0] + W[1] * gy[1] + W[2] * gy[2] + bVp[13];
+                const float dx = ((rt[0] * gx[0] + rt[1] * gx[1] + rt[2] * gx[2]) * bw -
+                                  cx * (rt[0] * gw[0] + rt[1] * gw[1] + rt[2] * gw[2])) / (bw * bw);
+                const float dy = ((u[0] * gy[0] + u[1] * gy[1] + u[2] * gy[2]) * bw -
+                                  cy * (u[0] * gw[0] + u[1] * gw[1] + u[2] * gw[2])) / (bw * bw);
+                if (dx > 1e-9f && dy > 1e-9f) {
+                    memcpy(right, rt, sizeof(right));
+                    memcpy(up, u, sizeof(up));
+                    sx = 1.0f / dx;
+                    sy = 1.0f / dy;
+                    g_faced.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }
+    }
+    float e0[4];
+    for (int j = 0; j < 4; ++j) {
+        e0[j] = W[0] * eVp[j] + W[1] * eVp[4 + j] + W[2] * eVp[8 + j] + eVp[12 + j];
+        Kx[j] = sx * (right[0] * eVp[j] + right[1] * eVp[4 + j] + right[2] * eVp[8 + j]);
+        Ky[j] = sy * (up[0] * eVp[j] + up[1] * eVp[4 + j] + up[2] * eVp[8 + j]);
+    }
+    if (!(e0[3] > 1e-3f)) return false;
+    // Scale so clip w = 1 at W (same picture; and should a vertex shader force w = 1, W still lands exactly and the
+    // piece degrades to the affine card instead of leaving the screen).
+    const float iw = 1.0f / e0[3];
+    for (int j = 0; j < 4; ++j) {
+        Kx[j] *= iw;
+        Ky[j] *= iw;
+        K0[j] = e0[j] * iw - rx * Kx[j] - ry * Ky[j];
+    }
     return true;
 }
 
@@ -698,9 +785,31 @@ bool on_hud_draw(ID3D11DeviceContext* ctx) {
     // of the reference picture onto that card (same base clip z and w as the object) and then into this
     // eye; the piece's placement is replaced by F's first-order expansion about the reference point
     // (markers are small, so the linear part is exact to well under a pixel).
+    // MARKERUPRIGHT: the piece's reference point q = (x*m0 + y*m4 + m12, x*m1 + y*m5 + m13) goes through
+    // clip = K0 + q.x*Kx + q.y*Ky, folded into cb0's rows 0 / 1 / 3 (all four columns: w becomes perspective). z stays 0.
+    bool upright = false;
+    if (g_card.load(std::memory_order_relaxed) && g_upright.load(std::memory_order_relaxed) && bVp) {
+        float K0[4], Kx[4], Ky[4];
+        if (upright_card(bVp, p.vp, world, rx, ry, K0, Kx, Ky)) {
+            float r0[4], r1[4], r3[4];
+            for (int j = 0; j < 4; ++j) {
+                r0[j] = m[0] * Kx[j] + m[1] * Ky[j];
+                r1[j] = m[4] * Kx[j] + m[5] * Ky[j];
+                r3[j] = K0[j] + m[12] * Kx[j] + m[13] * Ky[j];
+            }
+            r0[2] = r1[2] = r3[2] = 0.0f;
+            memcpy(m, r0, 16);
+            memcpy(m + 4, r1, 16);
+            memcpy(m + 12, r3, 16);
+            upright = true;
+            g_uprights.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            g_uprightFails.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     float Jx[2] = {1, 0}, Jy[2] = {0, 1};
     bool card = false;
-    if (g_card.load(std::memory_order_relaxed) && bVp && bInv) {
+    if (!upright && g_card.load(std::memory_order_relaxed) && bVp && bInv) {
         float bc[4];
         for (int j = 0; j < 4; ++j)
             bc[j] = world[0] * bVp[j] + world[1] * bVp[4 + j] + world[2] * bVp[8 + j] + bVp[12 + j];
@@ -735,7 +844,7 @@ bool on_hud_draw(ID3D11DeviceContext* ctx) {
         m[12] = eye[0] + ox * Jx[0] + oy * Jy[0];
         m[13] = eye[1] + ox * Jx[1] + oy * Jy[1];
         g_cards.fetch_add(1, std::memory_order_relaxed);
-    } else {
+    } else if (!upright) {
         m[12] += dx;
         m[13] += dy;
     }
@@ -767,6 +876,10 @@ void draw_ui() {
         if (bvr::overlay::show_tests() && bvr::overlay::SliderStep("   marker piece reach", &r, 0.03f, 0.4f, "%.2f")) g_radius.store(r);
         bool card = g_card.load();
         if (bvr::overlay::show_tests() && ImGui::Checkbox("   markers turn with the game camera, not your head", &card)) g_card.store(card);
+        bool upr = g_upright.load();
+        if (bvr::overlay::show_tests() && ImGui::Checkbox("   markers stand upright in exact perspective (Arkham Knight fix)", &upr)) g_upright.store(upr);
+        bool face = g_face.load();
+        if (bvr::overlay::show_tests() && ImGui::Checkbox("   ... tilted to face the game camera", &face)) g_face.store(face);
         int lag = g_lag.load();
         if (bvr::overlay::show_tests() && bvr::overlay::SliderStepInt("   marker frame lag", &lag, 0, 1)) g_lag.store(lag);
         if (bvr::overlay::show_tests()) ImGui::TextDisabled("   moved pieces %u, last shift %.3f, %.3f", g_pieces.load(), g_lastDx.load(), g_lastDy.load());
@@ -791,9 +904,12 @@ void status_text(std::string& out) {
     char buf[512];
     snprintf(buf, sizeof(buf),
              "\nMARKEREYE on %d reach %.2f lag %d | Canvas.Project calls %u, forced to the game camera %u | marker pieces "
-             "moved %u (no pass %u, as cards %u), last shift (%.4f, %.4f) | reference = game camera, no head\n",
+             "moved %u (no pass %u, as cards %u, upright %d: placed %u, fell back %u, face %d: faced %u), last shift "
+             "(%.4f, %.4f) | reference = game camera, no head\n",
              g_on.load() ? 1 : 0, g_radius.load(), g_lag.load(), g_projects.load(), g_forced.load(), g_pieces.load(),
-             g_noPass.load(), g_cards.load(), g_lastDx.load(), g_lastDy.load());
+             g_noPass.load(), g_cards.load(), g_upright.load() ? 1 : 0, g_uprights.load(), g_uprightFails.load(),
+             g_face.load() ? 1 : 0, g_faced.load(),
+             g_lastDx.load(), g_lastDy.load());
     out += buf;
     snprintf(buf, sizeof(buf),
              "AIMDEPTH on %d min %.0f reach %.2f | passes %u, answers %u (no surface %u), last distance %.1f, reticle pieces "
@@ -822,6 +938,8 @@ void settings_write(std::string& out) {
              g_aimMin.load());
     out += buf;
     out += g_hdOn.load() ? "reticle_hd=1\n" : "reticle_hd=0\n";
+    out += g_upright.load() ? "marker_upright=1\n" : "marker_upright=0\n";
+    out += g_face.load() ? "marker_face=1\n" : "marker_face=0\n";
 }
 
 bool settings_read(const char* key, const char* val) {
@@ -829,6 +947,8 @@ bool settings_read(const char* key, const char* val) {
     if (!strcmp(key, "marker_fix")) g_on.store(atoi(val) != 0);
     else if (!strcmp(key, "marker_reach")) { if (f >= 0.03f && f <= 0.4f) g_radius.store(f); }
     else if (!strcmp(key, "marker_card")) g_card.store(atoi(val) != 0);
+    else if (!strcmp(key, "marker_upright")) g_upright.store(atoi(val) != 0);
+    else if (!strcmp(key, "marker_face")) g_face.store(atoi(val) != 0);
     else if (!strcmp(key, "marker_lag")) { const int l = atoi(val); g_lag.store(l == 1 ? 1 : 0); }
     else if (!strcmp(key, "aim_depth")) g_aimOn.store(atoi(val) != 0);
     else if (!strcmp(key, "reticle_hd")) g_hdOn.store(atoi(val) != 0);

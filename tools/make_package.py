@@ -61,7 +61,7 @@ for dp, _, fs in os.walk(stage):
             b = open(os.path.join(dp, f), 'rb').read()
             if b.count(b'\n') != b.count(b'\r\n'): bad.append(f + ': not CRLF')
 if b'[batman_city-proxy]' not in open(os.path.join(stage, 'xinput1_3.dll'), 'rb').read(): bad.append('xinput1_3.dll is not ours')
-built = os.path.join(ROOT, 'build', 'src', 'RelWithDebInfo', 'batman_city.dll')
+built = os.path.join(ROOT, 'build', 'src', 'Release', 'batman_city.dll')
 h = lambda p: hashlib.sha256(open(p, 'rb').read()).hexdigest()
 if os.path.exists(built) and h(built) != h(os.path.join(stage, 'batman_city.dll')):
     print('NOTE: build/ has a newer batman_city.dll than the game folder; the package takes the game folder\'s (tested) one')

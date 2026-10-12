@@ -37,28 +37,40 @@ constexpr uintptr_t kReflectUpdateRequired = 0x0080A2B0;
 struct LeftUpdate { void* probe; uint32_t pass; };
 LeftUpdate g_leftUpdates[16]; // render thread only
 unsigned g_leftUpdateN = 0;
-std::atomic<uint32_t> g_forced{0}, g_leftCaptures{0}, g_rightSkips{0};
+std::atomic<uint32_t> g_forced{0}, g_pausedForced{0}, g_leftCaptures{0}, g_rightSkips{0};
 
 int __fastcall update_detour(void* probe, void* edx, const void* family) {
     const int r = g_updateOrig(probe, edx, family);
     const int eye = g_eye.load(std::memory_order_relaxed);
     const uint32_t pass = g_pass.load(std::memory_order_relaxed);
-    if (eye < 0) {
-        if (r) {
+    if (r) {
+        if (eye < 0) {
             g_leftCaptures.fetch_add(1, std::memory_order_relaxed);
             g_leftUpdates[g_leftUpdateN++ % 16] = {probe, pass};
         }
         return r;
     }
-    if (eye > 0 && !r && g_on.load(std::memory_order_relaxed)) {
-        // Updated in this frame's left pass (the pass just before) -> render it again for the right eye.
+    if (!g_on.load(std::memory_order_relaxed)) return r;
+    // Updated in this frame's left pass (the pass just before) -> render it again for the right eye.
+    if (eye > 0)
         for (const LeftUpdate& u : g_leftUpdates)
             if (u.probe == probe && pass - u.pass <= 2) {
                 g_forced.fetch_add(1, std::memory_order_relaxed);
                 return 1;
             }
-        g_rightSkips.fetch_add(1, std::memory_order_relaxed);
+    // Captured already at this game time (probe LastCaptureTime +0x48 == family CurrentWorldTime +0x1C; CaptureScene
+    // stores exactly that value, 0x80A51E) -> render it again for this eye. In play that is the right pass after the
+    // left pass's capture; while PAUSED the game time stands still, so both eyes keep re-rendering the probe that
+    // was live when the pause began (otherwise the water kept the picture from the pause moment, sampled by
+    // screen position = it slid with the head; JJ 2026-10-11 captures 171831/171834: capture count frozen).
+    uint32_t last, now;
+    memcpy(&last, static_cast<const uint8_t*>(probe) + 0x48, 4);
+    memcpy(&now, static_cast<const uint8_t*>(family) + 0x1C, 4);
+    if (last == now && last != 0) {
+        (eye > 0 ? g_forced : g_pausedForced).fetch_add(1, std::memory_order_relaxed);
+        return 1;
     }
+    if (eye > 0) g_rightSkips.fetch_add(1, std::memory_order_relaxed);
     return r;
 }
 std::atomic<bool> g_picReq{false};
@@ -223,9 +235,10 @@ void draw_ui() {
 
 void status_line(char* out, unsigned n) {
     snprintf(out, n,
-             "REFLECTEYE per-eye capture %d: left-pass captures %u, right-pass re-captures %u, right skips %u | shift "
-             "option %d: shifts %u (failed %u), last du %.3f",
-             g_on.load() ? 1 : 0, g_leftCaptures.load(), g_forced.load(), g_rightSkips.load(), g_shift.load() ? 1 : 0,
+             "REFLECTEYE per-eye capture %d: left-pass captures %u, right-pass re-captures %u, paused left re-captures "
+             "%u, right skips %u | shift option %d: shifts %u (failed %u), last du %.3f",
+             g_on.load() ? 1 : 0, g_leftCaptures.load(), g_forced.load(), g_pausedForced.load(), g_rightSkips.load(),
+             g_shift.load() ? 1 : 0,
              g_shifts.load(), g_failed.load(), g_lastDu.load());
 }
 

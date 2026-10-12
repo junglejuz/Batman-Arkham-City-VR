@@ -346,6 +346,7 @@ void set_hud_head_locked(bool on);
 void set_hud_eyes(int mode);
 // HUDMENU: the pause / map screen's own HUD panel distance and width (set by the adapter while that screen is up).
 void set_hud_menu_now(bool on);
+void set_hud_menu_hint(bool ok); // MS11: false = ignore the pause-screen drawing hint (no menu / closing)
 bool hud_menu_now();
 void note_hud_menu(); // render thread: the pause / map screen was drawn this frame
 void set_hud_menu_quad(float distM, float widthM);

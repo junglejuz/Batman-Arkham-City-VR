@@ -247,6 +247,11 @@ std::atomic<int> g_hudEyes{-1};
 // distance and width (default 4.5 m, 65 deg) and re-anchors in front of the head when that screen opens or closes.
 std::atomic<bool> g_hudMenuNow{false};
 std::atomic<uint32_t> g_hudMenuSeenAt{0}; // g_presentsSeen when the adapter last saw the pause / map screen
+// MS11 (JJ 2026-10-12: after unpausing the 88 deg HUD "feels like 70 or less"; HUDTRACE 16:39: the game draws the HUD at
+// its normal size at once and zones were on - the PANEL kept the menu size (~71 deg): the pause screen's grey pass fades
+// out after the menu closes and kept "seen" alive). The adapter turns that hint off when the game's own calls say no menu
+// is open or it is closing.
+std::atomic<bool> g_hudMenuHintOk{true};
 std::atomic<float> g_hudMenuDistM{4.5f};
 std::atomic<float> g_hudMenuWidthM{5.73f};
 bool g_hudMenuWas = false;
@@ -4804,7 +4809,8 @@ void on_present_end(IDXGISwapChain* swapchain) {
                     hudQuad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
                     const bool hudHead = g_hudHeadLocked.load(std::memory_order_relaxed);
                     const bool menuNow = g_hudMenuNow.load(std::memory_order_relaxed) ||
-                                         (g_hudMenuSeenAt.load(std::memory_order_relaxed) != 0 &&
+                                         (g_hudMenuHintOk.load(std::memory_order_relaxed) &&
+                                          g_hudMenuSeenAt.load(std::memory_order_relaxed) != 0 &&
                                           g_presentsSeen.load(std::memory_order_relaxed) -
                                                   g_hudMenuSeenAt.load(std::memory_order_relaxed) < 12);
                     if (menuNow != g_hudMenuWas) { g_hudMenuWas = menuNow; g_hudPlaced = false; }
@@ -5760,6 +5766,7 @@ void set_hud_head_locked(bool on) { g_hudHeadLocked.store(on, std::memory_order_
 void set_hud_eyes(int mode) { g_hudEyes.store(mode < 0 ? -1 : (mode > 0 ? 1 : 0), std::memory_order_relaxed); }
 int hud_eyes() { return g_hudEyes.load(std::memory_order_relaxed); }
 void set_hud_menu_now(bool on) { g_hudMenuNow.store(on, std::memory_order_relaxed); }
+void set_hud_menu_hint(bool ok) { g_hudMenuHintOk.store(ok, std::memory_order_relaxed); }
 bool hud_menu_now() { return g_hudMenuWas; }
 void note_hud_menu() { g_hudMenuSeenAt.store(g_presentsSeen.load(std::memory_order_relaxed) | 1u, std::memory_order_relaxed); }
 void set_hud_menu_quad(float distM, float widthM) { g_hudMenuDistM.store(distM); g_hudMenuWidthM.store(widthM); g_hudPlaced = false; }
@@ -6249,6 +6256,7 @@ void set_hud_head_locked(bool) {}
 bool hud_head_locked() { return false; }
 void set_hud_eyes(int) {}
 void set_hud_menu_now(bool) {}
+void set_hud_menu_hint(bool) {}
 bool hud_menu_now() { return false; }
 void note_hud_menu() {}
 void set_hud_menu_quad(float, float) {}
