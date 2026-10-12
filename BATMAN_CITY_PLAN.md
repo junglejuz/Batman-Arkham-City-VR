@@ -1955,3 +1955,9 @@ constant; neither -> extend the list to non-full-screen draws.
 - STATIC: Release built clean, installed B45DDCD7CD20E3A0 (backup before-release013). Package 117 files, 290.5 MB, sha256
   2ac253852986c5c7..., zip dll = installed, settings: hud 88 deg, markers upright / face 1, first_person 0,
   detective_overlay_fused 1. The cleaned build itself was not run in the game (JJ asked to deploy).
+### RELEASE 0.1.3 2026-10-13 (JJ: "package and deploy") - https://github.com/junglejuz/Batman-Arkham-City-VR/releases/tag/v0.1.3
+- Source a437155 on main (pushed). Asset BatmanCityVR-ArkhamCity.zip 290,486,397 bytes, sha256 2ac25385...68ff7 = GitHub's
+  digest. Notes list only HEADSET-confirmed changes (map / upgrades copy, upgrades speed, unpause, HUD size, detective
+  overlay, settings file). The cleaned build was not run in the game before release (JJ asked to deploy).
+- Open next: drone / moving-target markers slightly off (JJ 2026-10-13); Origins map copy (MAPFLAT notes in
+  batman_origins/BUILD_PLAN.md, the probe stays in Origins).
