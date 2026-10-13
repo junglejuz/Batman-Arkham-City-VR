@@ -2078,3 +2078,11 @@ before-panelwords). Memory panel-labels-plain-no-bad-switches.
   %LOCALAPPDATA%\openvr\openvrpaths.vrpath - then Steam's folder, then the default one. In the SteamVR launcher (PowerShell
   ConvertFrom-Json one-liner; tested on JJ's PC in isolation: finds the Program Files SteamVR) and in the mod's SVRFALLBACK
   (steamvr_active_dir). Built clean, DLL + launcher installed (0c39aef3220c31a3...). Ships in 0.1.4.
+
+### RELEASE 0.1.4 2026-10-14 (JJ: "Go ahead and upload to GitHub") - https://github.com/junglejuz/Batman-Arkham-City-VR/releases/tag/v0.1.4
+- Source 795d4ff on main (pushed). Asset BatmanCityVR-ArkhamCity.zip 290,491,252 bytes, sha256 f1d2f92db58c8e24... = GitHub's
+  digest; dll 0c39aef3220c31a3... (= build/src/Release = installed). Package checks: no top folder, SteamVR launcher CRLF
+  with the openvrpaths lookup, installer sets UseVsync=False.
+- HEADSET-confirmed in it: PANELMOUSE (JJ). Built but NOT run in the game before release (JJ asked to upload): SVRFALLBACK,
+  SVRACTIVE (launcher lookup checked in isolation), ELEVATED log, TABRACE, VSYNCOFF, PANELWORDS. Test: Tab x3, mouse menu,
+  tools/tests/Test-SVRFallback.bat.
