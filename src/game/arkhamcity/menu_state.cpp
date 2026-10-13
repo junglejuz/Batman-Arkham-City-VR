@@ -170,6 +170,7 @@ const void* g_started = nullptr;
 ULONGLONG g_startedMs = 0;
 std::atomic<bool> g_menuOpen{false};
 std::atomic<ULONGLONG> g_menuOpenAt{0}, g_menuClosedAt{0};
+std::atomic<bool> g_lastOpenBack{false}; // TABRACE: the last menu opened is the Tab screen (map / upgrades)
 void menu_track(int i, const void* self) { // under g_lock
     const ULONGLONG now = GetTickCount64();
     if (i == kStart) { g_started = self; g_startedMs = now; return; }
@@ -186,6 +187,7 @@ void menu_track(int i, const void* self) { // under g_lock
             m = OpenMenu{self, now, strstr(cls, "Pause") != nullptr, {}};
             memcpy(m.cls, cls, sizeof cls);
         }
+        g_lastOpenBack.store(strstr(cls, "BackScreen") != nullptr);
         g_menuOpen.store(true);
         g_menuOpenAt.store(now);
         BVR_LOG(PFX " menu open: %s", who);
@@ -291,6 +293,7 @@ bool live() {
 bool menu_open() { return g_menuOpen.load(std::memory_order_relaxed); }
 unsigned long long menu_open_at() { return g_menuOpenAt.load(std::memory_order_relaxed); }
 unsigned long long menu_closed_at() { return g_menuClosedAt.load(std::memory_order_relaxed); }
+bool last_open_is_back_screen() { return g_lastOpenBack.load(std::memory_order_relaxed); }
 void clear_stale(const char* why) {
     AcquireSRWLockExclusive(&g_lock);
     const int n = g_openN;

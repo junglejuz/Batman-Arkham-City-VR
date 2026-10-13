@@ -10,6 +10,7 @@
 #include "game/arkhamcity/afw.h"
 #include "game/arkhamcity/dlss_bridge.h"
 #include "core/gfx/gfx_hud.h"
+#include "core/ui/overlay.h"
 #include "core/vr/openxr_runtime.h"
 #include "core/util/log.h"
 
@@ -581,8 +582,9 @@ void draw_ui() {
         ImGui::TextDisabled("   smooth only when the game keeps up with the headset's rate (one eye per frame)"); // as AKVR
         uint32_t pw = 0, pf = 0;
         bvr::vr::afw_counts(&pw, &pf);
-        ImGui::Text("pairs warped %u, drawn eye in both %u | warp %.2f ms | holes %.1f %% + edge %.1f %%", pw, pf, g_ms,
-                    g_holePct, g_edgePct);
+        if (bvr::overlay::show_tests()) // PANELWORDS: numbers for tests only
+            ImGui::Text("pairs warped %u, drawn eye in both %u | warp %.2f ms | holes %.1f %% + edge %.1f %%", pw, pf, g_ms,
+                        g_holePct, g_edgePct);
     }
 }
 

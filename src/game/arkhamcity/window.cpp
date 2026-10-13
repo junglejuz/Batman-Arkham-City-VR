@@ -742,7 +742,7 @@ void draw_ui() {
     unsigned nw = 0, nh = 0;
     current_launch_res(&nw, &nh);
     ImGui::Text("Render size now: %ux%u per eye (headset recommends %ux%u)", bw, bh, rw, rh);
-    ImGui::Text("Next launch: %ux%u   (desktop-size answers given: %u)", nw ? nw : 2064u, nh ? nh : 2208u, g_spoofHits.load());
+    ImGui::Text("Next launch: %ux%u", nw ? nw : 2064u, nh ? nh : 2208u);
     // Slider (JJ 2026-10-03): a scale of the Quest 3's native 2064x2208 eye, same shape,
     // rounded to a multiple of 8. Saved when the slider is released.
     static float s_scale = -1.0f;

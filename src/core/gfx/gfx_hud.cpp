@@ -1409,7 +1409,10 @@ Decision classify_inner(ID3D11DeviceContext* ctx, unsigned count, bool indexed) 
                 // pieces, which kept extending the hold to the 4 s cap with no HUD shown. Opening a menu from gameplay: the
                 // hold ends g_menuOpenHoldMs after the recording; wipes inside the menus keep the 4 s cap (WIPEMAIN3).
                 g_hideAllCap = nowMs + (g_wipeFromGameplay ? g_recTime[g_recCount - 1] + ULONGLONG(g_menuOpenHoldMs.load(std::memory_order_relaxed)) : 4000);
-                g_replayInvert = g_wipeFlipOn.load(std::memory_order_relaxed) && g_menuScale < 1.0e-3f && !gameplay;
+                // TABRACE: an opening from gameplay keeps the FLIPPED replay JJ approved (0.1.3 run 00:01:10, where the
+                // clock had already stopped by the replay start); it is gameplay for its first 300 ms now.
+                g_replayInvert = g_wipeFlipOn.load(std::memory_order_relaxed) && g_menuScale < 1.0e-3f &&
+                                 (!gameplay || g_wipeFromGameplay);
                 g_replayOn.store(true);
                 g_replays.fetch_add(1, std::memory_order_relaxed);
                 if (!g_replayInvert) wipe_event(0); // WIPESOUND: a wipe to black - the game's own bat sound plays now

@@ -1,6 +1,6 @@
 #pragma once
 // Batman City: freeze DirectInput GAME CONTROLLER reads while the VR menu is open (the game
-// reads pads through DirectInput as well as XInput). Keyboard and mouse are never touched.
+// reads pads through DirectInput as well as XInput), and its DirectInput mouse. Keyboard is never touched.
 
 #include <cstdint>
 

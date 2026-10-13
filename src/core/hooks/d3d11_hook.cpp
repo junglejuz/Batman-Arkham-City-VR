@@ -141,6 +141,17 @@ HRESULT WINAPI PresentDetour(IDXGISwapChain* swapchain, UINT syncInterval, UINT 
             device->Release();
         }
     }
+    // VSYNCOFF (player report 2026-10-13: "had to manually disable vsync"): once a session runs the headset paces the
+    // game, so the window's Present must never wait on the monitor (playbook 09 #mirror-is-a-scheduler, FAIL-PERF-022).
+    // Forced here whatever the game's UseVsync says.
+    if (syncInterval != 0 && vr::session_live()) {
+        static bool s_logged = false;
+        if (!s_logged) {
+            s_logged = true;
+            BVR_LOG("present: the game asks for V-sync (interval %u) - forced off while VR runs", syncInterval);
+        }
+        syncInterval = 0;
+    }
     vr::set_present_stage("gamePresent"); // the game's own Present - not our code
     HRESULT hr = g_origPresent(swapchain, syncInterval, flags);
     vr::set_present_stage(nullptr);

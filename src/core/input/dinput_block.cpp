@@ -21,7 +21,11 @@
 // If that filter misses a pad, the game reads it twice and the XInput block alone leaks. While
 // the menu is open, every DirectInput GAME CONTROLLER read here returns the state from just
 // before the menu opened (frozen - nothing changes, so nothing is pressed) and buffered events
-// are dropped. Keyboard and mouse devices are never touched.
+// are dropped. Keyboard devices are never touched.
+// PANELMOUSE (player report 2026-10-13: the F10 menu's mouse "gets weird"): the game reads the MOUSE through DirectInput
+// too, so moving it over the open VR menu also turned the camera / moved the game's own menu cursor. While the menu is
+// open its reads return no movement and no buttons, and its buffered events are dropped (the menu reads the cursor
+// through the window's messages, which DirectInput does not change).
 
 namespace bvr::input::dinput_block {
 namespace {
@@ -33,7 +37,7 @@ GetDeviceDataFn g_dataOrig[2] = {};
 
 struct Dev {
     void* ptr = nullptr;
-    int kind = -1; // -1 unknown, 0 not a controller, 1 controller
+    int kind = -1; // -1 unknown, 0 neither, 1 controller, 2 mouse
     DWORD bytes = 0;
     unsigned char frozen[512] = {};
 };
@@ -56,10 +60,12 @@ Dev* lookup(void* dev) {
         DIDEVCAPS caps{};
         caps.dwSize = sizeof(caps);
         auto* w = static_cast<IDirectInputDevice8W*>(dev);
-        d.kind = SUCCEEDED(w->GetCapabilities(&caps)) && is_controller_type(caps.dwDevType) ? 1 : 0;
+        const bool got = SUCCEEDED(w->GetCapabilities(&caps));
+        d.kind = !got ? 0 : is_controller_type(caps.dwDevType) ? 1 : GET_DIDEVICE_TYPE(caps.dwDevType) == DI8DEVTYPE_MOUSE ? 2 : 0;
         if (d.kind == 1)
             BVR_LOG("input: the game reads a game controller through DirectInput too (type 0x%02X) - "
                     "frozen while the VR menu is open", GET_DIDEVICE_TYPE(caps.dwDevType));
+        if (d.kind == 2) BVR_LOG("input: the game reads the mouse through DirectInput - still while the VR menu is open");
         return &d;
     }
     return nullptr;
@@ -71,7 +77,14 @@ HRESULT STDMETHODCALLTYPE state_detour(IDirectInputDevice8W* self, DWORD cb, LPV
     if (FAILED(hr) || !data || cb == 0 || cb > sizeof(Dev::frozen)) return hr;
     std::lock_guard<std::mutex> lk(g_mutex);
     Dev* d = lookup(self);
-    if (!d || d->kind != 1) return hr;
+    if (!d || d->kind == 0) return hr;
+    if (d->kind == 2) { // mouse: relative movement + buttons, so all zero = still and released
+        if (game_pad_blocked()) {
+            memset(data, 0, cb);
+            g_blockedReads.fetch_add(1, std::memory_order_relaxed);
+        }
+        return hr;
+    }
     if (game_pad_blocked()) {
         if (d->bytes == cb) memcpy(data, d->frozen, cb);
         else memset(data, 0, cb);
@@ -90,7 +103,7 @@ HRESULT STDMETHODCALLTYPE data_detour(IDirectInputDevice8W* self, DWORD cbObj, L
     if (FAILED(hr) || !inOut) return hr;
     std::lock_guard<std::mutex> lk(g_mutex);
     Dev* d = lookup(self);
-    if (d && d->kind == 1 && game_pad_blocked() && *inOut) {
+    if (d && d->kind >= 1 && game_pad_blocked() && *inOut) {
         *inOut = 0; // events while the menu is open are the menu's
         g_blockedReads.fetch_add(1, std::memory_order_relaxed);
     }

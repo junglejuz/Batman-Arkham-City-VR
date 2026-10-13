@@ -846,7 +846,8 @@ void draw_ui() {
     if (bvr::overlay::SliderStep("light beams strength", &sd, 0.0f, 1.0f, "%.2f")) g_spriteDim.store(sd);
     if (bvr::overlay::show_tests()) ImGui::TextDisabled("   beam draws %u, on their own layer %u, kept (depth of field on) %u", g_spriteSeen.load(), g_spriteDimmed.load(),
                         g_spriteOther.load());
-    ImGui::TextUnformatted("find the glow (test): hide one group of see-through effects while you look at a glowing sign");
+    if (bvr::overlay::show_tests()) // PANELWORDS: a test, not a setting
+        ImGui::TextUnformatted("find the glow (test): hide one group of see-through effects while you look at a glowing sign");
     int hg = g_hideGroup.load();
     if (bvr::overlay::show_tests() && bvr::overlay::SliderStepInt("   hidden group (-1 = none)", &hg, -1, std::max(0, g_censusN - 1))) g_hideGroup.store(hg);
     if (hg >= 0 && hg < g_censusN)

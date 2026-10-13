@@ -13,6 +13,7 @@ bool live();                                 // Start / Close / SetFocus hooked
 bool menu_open();
 unsigned long long menu_open_at();           // GetTickCount64 of the last opening / closing
 unsigned long long menu_closed_at();
+bool last_open_is_back_screen();             // TABRACE: the last menu opened = RGFxMovieBackScreen (map / upgrades)
 void clear_stale(const char* why);           // the adapter's safety: the game has run on for a while
 
 } // namespace bvr::ac::menu_state

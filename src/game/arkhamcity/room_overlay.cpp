@@ -538,9 +538,9 @@ void set_mode(int m) { g_mode.store(m < kOriginal || m > kHidden ? kRoom : m); }
 void draw_ui() {
     static const char* kModes[] = {"as the game draws it (on your face)", "on a screen in the room", "removed"};
     int m = g_mode.load();
-    if (ImGui::Combo("title-screen grime", &m, kModes, 3)) set_mode(m);
+    if (ImGui::Combo("title screen: dirty-glass effect", &m, kModes, 3)) set_mode(m);
     bool dr = g_dirtRoom.load();
-    if (ImGui::Checkbox("pause menu grime (off = removed)", &dr)) g_dirtRoom.store(dr);
+    if (ImGui::Checkbox("pause menu: dirty-glass effect (off = removed)", &dr)) g_dirtRoom.store(dr);
     if (g_dirtRoom.load()) {
         float sp = g_dirtSpanDeg.load();
         if (bvr::overlay::show_tests() && bvr::overlay::SliderStep("pause dirt spread (deg)", &sp, 60.0f, 300.0f, "%.0f")) g_dirtSpanDeg.store(sp);

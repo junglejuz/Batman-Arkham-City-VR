@@ -1961,3 +1961,120 @@ constant; neither -> extend the list to non-full-screen draws.
   overlay, settings file). The cleaned build was not run in the game before release (JJ asked to deploy).
 - Open next: drone / moving-target markers slightly off (JJ 2026-10-13); Origins map copy (MAPFLAT notes in
   batman_origins/BUILD_PLAN.md, the probe stays in Origins).
+
+## PLAYER REPORTS 2026-10-13 (0.1.3 players, via JJ)
+Reports: (1) had to turn V-sync off by hand; (2) the Tab screen (upgrades / map) is completely black; (3a) F10 menu: mouse
+cursor offset from the items (pad works), cursor "pulls in a certain direction" and "renders double"; (3b) can't move over
+the F10 menu with the mouse - same on VD, OpenXR and SteamVR; (4) "didn't work" on a Pimax.
+Looked up: VR_ESSENTIALS §4 (desktop Present must not wait on a monitor: playbook 09 #mirror-is-a-scheduler,
+FAIL-PERF-022, b955f224); this plan MAPSCREEN / MAPBLIT / MS1-MS11 (map + upgrades work on JJ's PC, HEADSET); installer
+step 4 (no UseVsync); overlay.cpp mouse path vs ImGui 1.92.8 imgui_impl_win32 UpdateMouseData; BatmanAC.exe imports
+(DirectInput8Create, SetCursorPos, ClipCursor, ShowCursor); web: Pimax 32-bit OpenXR support unclear (PimaxXR 0.3.2
+"fix 32-bit apps"; Pimax Play's built-in runtime unknown).
+- (1) SOURCE VSYNCOFF: installer sets UseVsync=False (BmEngine + UserEngine); d3d11_hook forces Present interval 0 while a
+  session runs (log "present: the game asks for V-sync ... forced off"), so a player who turns it back on is covered.
+- (3) SOURCE cause: overlay.cpp scaled io.MousePos (last frame's value) by panel/window; ImGui >= 1.87 takes the mouse
+  from QUEUED events in window pixels, so moving the mouse put it at unscaled window pixels (offset), every still frame
+  scaled it again (creeps to a corner = "pulls"), and the two alternate ("double"). JJ only ever used the pad.
+  PANELMOUSE: map the queued events instead, from the part of the client area on the monitor (the VR window is taller
+  than most monitors) onto the whole panel; lock around the queue (window messages = game thread, panel = render
+  thread). dinput_block: the game's DirectInput MOUSE reads return no movement / no buttons while the panel is open
+  (camera no longer turns, the game's own menu cursor stays put). Not done: blocking the game's SetCursorPos / ClipCursor
+  - only if the test shows the cursor still pulled.
+  Same scaling bug (not fixed, other projects): batman_origins, batman_asylum, swbf2vr, fc3vr overlay.cpp.
+- (2) OPEN, not reproduced: on JJ's PC map + upgrades show (MS2-MS11 HEADSET). Differences a player has: fresh install
+  (shipped settings.ini / launch.ini / menu_wipe.bin), keyboard Tab instead of the pad, other render size / headset.
+  Rules that can blacken the whole view: MAPBLIT (eye black, scene on the HUD sheet), BLACKFILL (6 s cap), MENUFADE
+  (10 s cap); placement thresholds were measured at JJ's window shape. Need the player's batman_city.log.
+- (4) OPEN: need the player's batman_city.log (runtime name, 32-bit runtime found or not, session / swapchain errors).
+STATIC: Release built clean (d3d11_hook, dinput_block, overlay), installed SHA-256 64612b4819e0499f..., backup
+<game>\Binaries\Win32\backups\batman_city.dll.before-playerfix. Not run.
+### TEST PLAN PR1 (one City launch, JJ drives, I watch the log)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 0 | launch VR, load into gameplay | VSYNCOFF | log "forced off" only if the game asks for V-sync (JJ's ini already False: set UseVsync=True first for this test) |
+| 1 | F10, move the mouse over every item, click a checkbox and a slider, let go of the mouse 5 s | PANELMOUSE | cursor stays where left, on the item under it, reaches all four edges; one cursor |
+| 2 | while the panel is open in gameplay, move the mouse a lot | mouse block | camera does not turn; log "the game reads the mouse through DirectInput" |
+| 3 | pause menu, F10 open, move the mouse | game cursor | the game's own cursor does not move |
+| 4 | close F10, mouse-look | release | camera turns normally |
+| 5 | Tab with the KEYBOARD (not the pad), each tab, close | report (2) | screen shows; if black: capture + log lines around it |
+Follow-ups: cursor still pulled in (1) -> block the game's SetCursorPos while the panel is open; (5) black -> read
+which rule fired (MAPBLIT / BLACKFILL / MENUFADE lines) and repeat with `bc mapblit`-style switches off.
+- (4) update (JJ 2026-10-13): Pimax "didn't hook at all into VR" = no VR session, game flat. SOURCE: init_instance logs
+  the 32-bit ActiveRuntime (WOW6432Node view) and "no 32-bit OpenXR runtime reachable" / xrCreateInstance failure, so
+  the log names the cause. Lead: Pimax Play's OpenXR registers 64-bit only. Workaround sent: the "Batman City VR
+  (SteamVR)" shortcut (SteamVR's own 32-bit OpenXR runtime, Pimax runs under SteamVR). PR1 step 5 (Tab) dropped: not
+  JJ's report, he cannot test it - waits for the player's log.
+### TABRACE (2026-10-13; the black-Tab player's log, temp\batman_city.log: SteamVR 2.18.3 'lighthouse', RTX 5090, AFW mode 3)
+- LIVE (player): both Tab openings: "menu open: RGFxMovieBackScreen" -> clock STOPPED +38 / +39 ms -> "wipe starts (...,
+  menus)" +83 / +51 ms -> FLIPPED replay, first one also "menu fade to black on the panel (alpha ~255) -> whole view
+  black, panel hidden" with no "box gone" after; the player closed it at 1.47 / 1.36 s, still black. No map-shape line
+  (upgrades tab: MAPSCREEN never ends the hold).
+- LIVE (JJ): 0.1.3 run 00:01:10 the wipe came 7 ms BEFORE the clock stop -> "gameplay" -> map after ~0.5 s; run 14:22
+  today (no headset) both openings "menus" -> "wipe replay ended after 4000 ms" = the old "upgrades sometimes take several
+  seconds" (MS2). Same race everywhere; the player's PC (45 fps AFW) lost it every time.
+- SOURCE TABRACE: menu_state remembers whether the last menu opened is RGFxMovieBackScreen; scene.cpp keeps the HUD in
+  gameplay for the first 300 ms of a BackScreen opened from gameplay (gameplay HUD within 100 ms before it), whatever the
+  clock says (pause menu unchanged). gfx_hud: an opening from gameplay keeps the FLIPPED replay of JJ's approved run.
+  Expected: every Tab opening logs "wipe starts (..., gameplay)", hold ends at recording + 250 ms (~1.4 s), no
+  "whole view black" at the opening.
+- Also seen: the log's "32-bit ActiveRuntime points at SteamVR ... no 32-bit support" line is outdated (SteamVR ships
+  steamxr_win32 now; the instance was created fine). Cosmetic.
+- STATIC: Release built clean, installed SHA-256 1408cdb5ad783d19... (carries PANELMOUSE + VSYNCOFF); backup unchanged
+  (before-playerfix = 0.1.3). Not run.
+- PR1 add: step 5 = open Tab x3 with the pad, from gameplay -> log "gameplay" each time, screen after ~1.4 s.
+### SVRFALLBACK (2026-10-13; Pimax player log temp\batman_city_pimax native.log - same PC as the SteamVR log)
+- LIVE (player): "32-bit ActiveRuntime: 'C:\Program Files\Pimax\Runtime\PiOpenXR_64.json'" -> "[native] no 32-bit OpenXR
+  runtime reachable (-51)" -> "VR disabled, game runs flat". Pimax registers its 64-bit runtime in the 32-bit slot too.
+  The same PC ran in VR through the SteamVR launcher (TABRACE log).
+- SOURCE SVRFALLBACK (openxr_runtime init_instance): when no 32-bit runtime library loads at all (the extension
+  enumerate fails - not a create failure such as a headset that is off), point the loader at SteamVR's
+  steamxr_win32.json (found like the SteamVR launcher: Steam's folder from the registry, then Program Files (x86)) for
+  this launch and retry. SteamVR fixes key on the runtime name, so they apply. Also: the startup line no longer calls
+  steamxr_win32 "no 32-bit support".
+- STATIC: Release built clean, installed SHA-256 7c9d0ee0fe4102e6... (carries PANELMOUSE, VSYNCOFF, TABRACE). Not run.
+- Test: tools\tests\Test-SVRFallback.bat starts the game with only VD's 64-bit manifest visible (= the Pimax case);
+  judge: log "trying SteamVR's" then "instance created on runtime 'SteamVR/OpenXR'", picture in the headset via SteamVR.
+### PANELMOUSE crash (2026-10-13 16:37, JJ: "opening an overlay drawer with the mouse crashed the game")
+- LIVE: crash 0xE06D7363 (C++ exception) thrown from batman_city.dll ~8 s after the panel opened; dump
+  %LOCALAPPDATA%\Batman_City\crash\bvr_20261013_163746.dmp. Cause (SOURCE): the PANELMOUSE lock was a plain std::mutex
+  held around ImGui's WndProc handler; on button-up the backend calls ReleaseCapture, which sends WM_CAPTURECHANGED
+  straight back into our WndProc on the same thread -> the same mutex locked twice -> MSVC throws
+  resource_deadlock_would_occur. A drawer click = press + release.
+- Fix: std::recursive_mutex (both lock sites). Release built clean, installed SHA-256 3913c87e46b0e497... Not run.
+- Lesson: never hold a plain lock around a window-message handler - Win32 calls can re-enter it on the same thread.
+- HEADSET (JJ 2026-10-13): "Arkham City's mouse works now in the overlay" (PANELMOUSE + recursive lock). Porting to Origins
+  and Arkham Knight (JJ).
+
+### PANELWORDS 2026-10-13 (JJ: "Some of the labels on these things are very confusing" - after ticking a jargon box in Origins)
+Visible labels rewritten for JJ (tests stay behind "show test options"): world scale "(higher = the world looks smaller)";
+"HUD painted into the 3D picture (off: on its own floating panel)"; "HUD sits at its set distance: auto/on/off" (off: looks
+far away); "title screen / pause menu: dirty-glass effect"; AFW numbers, map-screen clock diagnostics, "find the glow (test)"
+text and the resolution's "desktop-size answers" now tests-only. Built clean, installed 032900b0206d8f6b... (backup
+before-panelwords). Memory panel-labels-plain-no-bad-switches.
+
+### PLAYER REPORT 2026-10-13 ~22:1x (SteamVR, via JJ): game "Fatal error!" (fixed by the player turning Steam Cloud on -
+### game-side, not the mod) and then "we still dont enter VR at all (steamvr) ... looks like steamvr 32bit wasnt set as an
+### active runtime" (suggests checking HKLM\SOFTWARE\WOW6432Node\Khronos\OpenXR\1 ActiveRuntime -> steamxr_win32.json)
+- The SteamVR launcher does not use that key: it sets XR_RUNTIME_JSON for the launch. The OpenXR loader ignores that variable
+  in an ELEVATED process -> then the 32-bit registry runtime is used = exactly the player's symptom. Not confirmed (no log).
+- SOURCE ELEVATED: init_instance logs "runtime chosen by the launcher: <json> | game running as administrator: YES/no" and a
+  plain WARNING when both. Built clean, installed (logging only). Ships with 0.1.4 (with SVRFALLBACK, PANELMOUSE, TABRACE,
+  VSYNCOFF, PANELWORDS).
+- Asked for: the player's batman_city.log (the "xr:" lines name the runtime that loaded or why none did).
+- LIVE (player log temp\batman_city.log, released build 6db03dd, game on Z:\SteamLibrary): "32-bit ActiveRuntime points at
+  SteamVR ('C:\Program Files (x86)\Steam\steamapps\common\SteamVR\steamxr_win32.json')" (the player had set it) ->
+  extension enumeration OK (runtime library loaded) -> "[native] xrCreateInstance failed: XrResult(-32)" =
+  XR_ERROR_FILE_ACCESS_ERROR from SteamVR's own 32-bit runtime -> flat. So the registry key is NOT the problem. Web: no
+  documented cause for -32 from SteamVR. Next evidence: SteamVR's per-app log Steam\logs\xrclient_BatmanAC.txt (VR_ESSENTIALS
+  §11), plus whether SteamVR was already running with the headset connected. Asked JJ to request it.
+- LIVE (player's Steam\logs\xrclient_BatmanAC.txt, 4 launches): every launch stops right after loading settings, before
+  the vrclient interface lookups / vrserver connect (JJ's working log continues "vrclient type=VRApplication_OpenXRInstance",
+  starts vrserver, connects). Runtime path differs: 04:17 "runtime=c:\games\SteamVR 2.16.7p", later runs the Program Files
+  (x86) SteamVR; xrclient 2.17.10 every time; "Skipping duplicate external driver" on every run = two SteamVR installs
+  disagreeing -> SteamVR's 32-bit client fails to load its own files (the -32). Player side; advice sent via JJ (verify
+  SteamVR files, keep one install, "Set SteamVR as OpenXR runtime").
+- SOURCE SVRACTIVE (JJ: "sure"): SteamVR found via the install SteamVR itself marks active - the first "runtime" entry of
+  %LOCALAPPDATA%\openvr\openvrpaths.vrpath - then Steam's folder, then the default one. In the SteamVR launcher (PowerShell
+  ConvertFrom-Json one-liner; tested on JJ's PC in isolation: finds the Program Files SteamVR) and in the mod's SVRFALLBACK
+  (steamvr_active_dir). Built clean, DLL + launcher installed (0c39aef3220c31a3...). Ships in 0.1.4.

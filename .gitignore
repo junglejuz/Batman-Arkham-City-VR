@@ -26,3 +26,6 @@ __pycache__/
 # Game art (WB): upscaled pictures ship only inside the release zip, never in the repository
 BatmanCityData/
 *.rgba
+
+# WB cover art crops for Discord - never in the repository
+images/discord/

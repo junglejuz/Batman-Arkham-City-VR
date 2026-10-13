@@ -193,7 +193,7 @@ foreach ($f in 'launch.ini', 'menu_wipe.bin') {
 Step '4. Setting the game up for VR'
 $bm = Read-Cfg (Join-Path $ConfigDir 'BmEngine.ini')
 $n = 0
-foreach ($kv in @(@('AllowD3D11', 'True'), @('MotionBlur', 'False'), @('LensFlares', 'False'))) {
+foreach ($kv in @(@('AllowD3D11', 'True'), @('MotionBlur', 'False'), @('LensFlares', 'False'), @('UseVsync', 'False'))) {
     if (Set-CfgValue $bm 'SystemSettings' $kv[0] $kv[1]) { $n++ }
 }
 if (Set-CfgValue $bm 'Engine.GameEngine' 'MaxSmoothedFrameRate' '90') { $n++ }
@@ -201,7 +201,7 @@ if ($n) { Save-Cfg $bm }
 $ue = Join-Path $ConfigDir 'UserEngine.ini'
 if (Test-Path $ue) {
     $u = Read-Cfg $ue; $m = 0
-    foreach ($kv in @(@('AllowD3D11', 'True'), @('MotionBlur', 'False'), @('LensFlares', 'False'))) {
+    foreach ($kv in @(@('AllowD3D11', 'True'), @('MotionBlur', 'False'), @('LensFlares', 'False'), @('UseVsync', 'False'))) {
         if (Set-CfgValue $u 'SystemSettings' $kv[0] $kv[1]) { $m++ }
     }
     if ($m) { Save-Cfg $u }
@@ -209,7 +209,7 @@ if (Test-Path $ue) {
 # The game rewrites the frame cap in BmEngine.ini from its install defaults at every start: raise it there too.
 $def = Join-Path $GameRoot 'BmGame\Config\DefaultEngine.ini'
 if (Test-Path $def) { $d = Read-Cfg $def; if (Set-CfgValue $d 'Engine.GameEngine' 'MaxSmoothedFrameRate' '90') { Save-Cfg $d } }
-Say '  DirectX 11 on, motion blur and lens flares off, frame cap 90.' Green
+Say '  DirectX 11 on, motion blur, lens flares and V-sync off, frame cap 90.' Green
 
 # ---- 6. shortcuts -----------------------------------------------------------------------------------
 if (-not $NoShortcuts) {

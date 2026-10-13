@@ -1185,7 +1185,17 @@ void* __fastcall calc_detour(void* self, void* edx, void* family, float* loc, in
         // ~30-90 ms after the Close) - capped at 1.5 s.
         const bool closing = probe && wipeAt > openAt &&
                              nowMs - wipeAt < 1500 && (menu_state::menu_open() || menu_state::menu_closed_at() >= wipeAt);
-        const bool gameplayHud = (closing || (!paused && !menuUp)) && !title && !movie_playing_now();
+        // TABRACE (player log 2026-10-13, Tab screen "completely black"): the game stops its clock ~40 ms after the
+        // menu opens and its opening wipe starts ~40-80 ms after; when the clock stop was seen first, the opening wipe
+        // counted as in-menu (4 s hold cap, panel fade = whole view black) - the player's PC lost that race every time,
+        // JJ's about one in three. The Tab screen opened from gameplay (gameplay HUD within 100 ms before it) is gameplay
+        // for its first 300 ms, whatever the clock says. Other menus (pause) unchanged.
+        static ULONGLONG s_lastPlayHud = 0;
+        const bool openingFromPlay = probe && menu_state::menu_open() && menu_state::last_open_is_back_screen() &&
+                                     nowMs - openAt < 300 && s_lastPlayHud &&
+                                     s_lastPlayHud + 100 >= openAt;
+        const bool gameplayHud = (closing || openingFromPlay || (!paused && !menuUp)) && !title && !movie_playing_now();
+        if (gameplayHud && !openingFromPlay) s_lastPlayHud = nowMs;
         // HIDEWIPES: the pause screen's own grey pass counts at once (the clock signal can lag).
         bvr::gfx_hud::set_hud_zones_gameplay(gameplayHud);
         bvr::vr::set_hud_menu_now(((paused || menuUp) && !closing) || title);
@@ -2070,7 +2080,7 @@ void draw_ui() {
     if (ImGui::CollapsingHeader("STEREO RENDERING")) afw::draw_ui();
     if (ImGui::CollapsingHeader("VIEW")) {
         float uu = g_uuPerM.load();
-        if (bvr::overlay::SliderStep("world scale  (game units per metre)", &uu, 30.0f, 200.0f, "%.0f")) g_uuPerM.store(uu);
+        if (bvr::overlay::SliderStep("world scale  (higher = the world looks smaller)", &uu, 30.0f, 200.0f, "%.0f")) g_uuPerM.store(uu);
         float ipd = g_ipdMm.load();
         if (bvr::overlay::SliderStep("eye distance (mm)", &ipd, 50.0f, 80.0f, "%.1f")) { g_ipdMm.store(ipd); set_ipd_tag(); }
         bool s2 = g_state2On.load();
@@ -2099,12 +2109,11 @@ void draw_ui() {
         // Needs symmetric eye shapes so flat HUD parts land on the same direction in both eyes
         // (they then read as far away instead of not fusing).
         bool inWorld = !g_hudQuad.load();
-        if (ImGui::Checkbox("HUD drawn into the world (reticles stay on their targets)", &inWorld)) {
+        if (ImGui::Checkbox("HUD painted into the 3D picture (off: on its own floating panel)", &inWorld)) {
             g_hudQuad.store(!inWorld);
             if (inWorld) bvr::gfx_hud::set_redirect(false);
             bvr::vr::set_asym_fov(!inWorld);
         }
-        ImGui::TextDisabled("   off = menus and HUD on the floating panel above");
         markers::draw_ui();
         // TIDY (JJ 2026-10-10: "clear out ... redundant options now in the VR overlay now that we have all the correct
         // settings and fixes"): the bat-wipe / menu-fade fixes are fixed ON (BATCUTS, HIDEWIPES, WIPEREPLAY, WIPEFLIP,
@@ -2131,12 +2140,11 @@ void draw_ui() {
             bvr::vr::recenter_panel();
         }
         int he = bvr::vr::hud_eyes();
-        ImGui::TextUnformatted("HUD depth for each eye (needed in Virtual Desktop):");
+        ImGui::TextUnformatted("HUD sits at its set distance:");
         ImGui::SameLine(); if (ImGui::RadioButton("auto##he", he < 0)) bvr::vr::set_hud_eyes(-1);
         ImGui::SameLine(); if (ImGui::RadioButton("on##he", he > 0)) bvr::vr::set_hud_eyes(1);
         ImGui::SameLine(); if (ImGui::RadioButton("off##he", he == 0)) bvr::vr::set_hud_eyes(0);
-        ImGui::TextDisabled("   %s - off: the HUD looks far away whatever its distance",
-                            bvr::vr::hud_eyes_active() ? "in use" : "not in use");
+        ImGui::TextDisabled("   off: the HUD looks far away whatever distance you set");
         // HUDZONES (JJ 2026-10-09): each part of the HUD resized and moved on its own.
         // HUDMENU (JJ 2026-10-09): the pause / map screen hangs at its own distance and size.
         {
@@ -2146,9 +2154,10 @@ void draw_ui() {
             bool mc = bvr::overlay::SliderStep("pause / map screen distance (m)", &md, 0.5f, 8.0f, "%.2f");
             mc |= bvr::overlay::SliderStep("pause / map screen size (degrees)", &mdeg, 30.0f, 120.0f, "%.0f");
             if (mc) bvr::vr::set_hud_menu_quad(md, 2.0f * md * tanf(0.5f * mdeg * kPi / 180.0f));
-            ImGui::TextDisabled("   menu / map screen %s | game clock %s (%d clock fields found)",
-                                bvr::vr::hud_menu_now() ? "showing now" : "not showing",
-                                g_gamePaused.load() ? "stopped" : "running", g_clockFields.load());
+            if (bvr::overlay::show_tests()) // PANELWORDS: diagnostics for tests only
+                ImGui::TextDisabled("   menu / map screen %s | game clock %s (%d clock fields found)",
+                                    bvr::vr::hud_menu_now() ? "showing now" : "not showing",
+                                    g_gamePaused.load() ? "stopped" : "running", g_clockFields.load());
         }
         if (ImGui::TreeNode("HUD groups: size and position")) {
             bool zon = bvr::gfx_hud::hud_zones_on();

@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 #include <Xinput.h>
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
@@ -35,6 +36,11 @@ ID3D11RenderTargetView* g_rtv = nullptr;
 ID3D11Texture2D* g_rtvBackbuffer = nullptr; // identity only, never deref'd
 HWND g_window = nullptr;
 WNDPROC g_originalWndProc = nullptr;
+// The game window's messages arrive on the game thread, the panel frame runs on the render thread: both touch ImGui's
+// input queue (PANELMOUSE). RECURSIVE (JJ 2026-10-13: a mouse click opening a drawer crashed the game): the backend's
+// ReleaseCapture on button-up sends WM_CAPTURECHANGED straight back into WndProc on the same thread - a plain mutex
+// locked twice threw (0xE06D7363).
+std::recursive_mutex g_inputMutex;
 
 // Batman City: the VR menu panel. While an XR session is live the overlay renders into its own
 // texture (kPanelPx square) that core shows as a room-fixed quad (AKVR's panel pattern), instead
@@ -157,7 +163,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                              : msg == WM_DESTROY ? "WM_DESTROY"
                                                  : "WM_ENDSESSION");
     if (g_visible) {
-        ImGui_ImplWin32_WndProcHandler(hwnd, msg, wparam, lparam);
+        {
+            std::lock_guard<std::recursive_mutex> lk(g_inputMutex);
+            ImGui_ImplWin32_WndProcHandler(hwnd, msg, wparam, lparam);
+        }
         // Session 22 (user report: overlay unusable while scrolling): while
         // ImGui owns the mouse/keyboard, CONSUME those messages instead of
         // letting the game fight the overlay for them (the wheel doubled as
@@ -169,6 +178,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             return TRUE;
     }
     return CallWindowProcW(g_originalWndProc, hwnd, msg, wparam, lparam);
+}
+
+void map_mouse_to_panel() {
+    // PANELMOUSE (player report 2026-10-13: F10 cursor offset from the items, "pulls in a certain direction",
+    // "renders double"): the old code scaled io.MousePos, last frame's value - the backend's queued mouse events
+    // (window pixels) replaced it whenever the mouse moved, and every still frame scaled it again, so the cursor
+    // jumped between two places and crept to a corner. Map the QUEUED events instead, from the part of the window
+    // the cursor can actually reach (the VR window is taller than most monitors) onto the whole panel.
+    RECT cr{};
+    if (GetClientRect(g_window, &cr)) {
+        POINT tl{cr.left, cr.top}, br{cr.right, cr.bottom};
+        ClientToScreen(g_window, &tl);
+        ClientToScreen(g_window, &br);
+        RECT vis{tl.x, tl.y, br.x, br.y};
+        MONITORINFO mi{sizeof(mi)};
+        RECT on{};
+        if (GetMonitorInfoW(MonitorFromWindow(g_window, MONITOR_DEFAULTTONEAREST), &mi) &&
+            IntersectRect(&on, &vis, &mi.rcMonitor))
+            vis = on;
+        const float vx = float(vis.left - tl.x), vy = float(vis.top - tl.y); // in client pixels
+        const float vw = float(vis.right - vis.left), vh = float(vis.bottom - vis.top);
+        if (vw > 0 && vh > 0) {
+            for (ImGuiInputEvent& e : GImGui->InputEventsQueue) {
+                if (e.Type != ImGuiInputEventType_MousePos || e.MousePos.PosX <= -FLT_MAX) continue;
+                e.MousePos.PosX = ImClamp((e.MousePos.PosX - vx) / vw, 0.0f, 1.0f) * float(kPanelPx);
+                e.MousePos.PosY = ImClamp((e.MousePos.PosY - vy) / vh, 0.0f, 1.0f) * float(kPanelPx);
+            }
+        }
+    }
 }
 
 bool CreateRenderTarget(IDXGISwapChain* swapchain) {
@@ -324,18 +362,11 @@ void on_present(IDXGISwapChain* swapchain) {
     io.FontGlobalScale = vrPanel ? 0.78f : 0.5f; // AKVR: 26 px font x 0.78 on the 1440 px panel
 
     ImGui_ImplDX11_NewFrame();
+    std::unique_lock<std::recursive_mutex> inputLock(g_inputMutex); // until NewFrame has taken the queued input
     input::set_menu_poll(true); // the backend's own XInput poll must see the pad
     ImGui_ImplWin32_NewFrame();
     input::set_menu_poll(false);
-    if (vrPanel) {
-        // Map the window's mouse onto the square panel texture.
-        const ImVec2 win = io.DisplaySize;
-        if (win.x > 0 && win.y > 0 && io.MousePos.x > -1e6f) {
-            io.MousePos.x *= float(kPanelPx) / win.x;
-            io.MousePos.y *= float(kPanelPx) / win.y;
-        }
-        io.DisplaySize = ImVec2(float(kPanelPx), float(kPanelPx));
-    }
+    if (vrPanel) io.DisplaySize = ImVec2(float(kPanelPx), float(kPanelPx));
     // ONESTEP: while one of our step sliders was controller-active last frame, ImGui must not see left/right (its own
     // tweak would be a second writer). The backend queued this frame's pad state above; queue "released" after it and
     // let the whole queue apply at once (no trickling), so the last state wins.
@@ -374,7 +405,9 @@ void on_present(IDXGISwapChain* swapchain) {
         }
     }
     ++g_frameNo;
+    if (vrPanel) map_mouse_to_panel();
     ImGui::NewFrame();
+    inputLock.unlock();
     DrawUi(vrPanel);
     ImGui::Render();
     if (vrPanel) {
