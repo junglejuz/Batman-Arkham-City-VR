@@ -30,6 +30,14 @@ void set_pass(uint32_t slot, int eye, uint32_t frame, const float vp[16], const 
 void on_project(int eye, uint32_t frame, const float world[3], float out[4]);
 // Render thread (BeginDrawing execute).
 void set_render_slot(uint32_t slot);
+// HEADAIM2 (2026-10-27, Origins AIMDEPTH): while head aim steers Batman's controller, the depth march and the aim reticle follow
+// the HEAD's centre ray instead of the head-free game camera's. Game thread, a pair's first eye; frame = set_pass's frame;
+// origin null = no head ray this frame.
+void set_aim_ray(uint32_t frame, const float origin[3], const float dir[3]);
+// Game thread: the point under the head's ray, if read within the last 150 ms.
+bool aim_point(float out[3]);
+// RETICLESPHERE: the HUD panel's distance in game units (game thread, every frame) - the aim reticle's sphere radius.
+void set_reticle_sphere(float radiusUU);
 
 // Render thread, once per HUD draw (after the scene): true = a world-marker piece; its VS cb0 has
 // been moved for this eye and the draw belongs in the eye image. after_hud_draw puts cb0 back.

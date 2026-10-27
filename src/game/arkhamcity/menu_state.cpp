@@ -294,6 +294,8 @@ bool menu_open() { return g_menuOpen.load(std::memory_order_relaxed); }
 unsigned long long menu_open_at() { return g_menuOpenAt.load(std::memory_order_relaxed); }
 unsigned long long menu_closed_at() { return g_menuClosedAt.load(std::memory_order_relaxed); }
 bool last_open_is_back_screen() { return g_lastOpenBack.load(std::memory_order_relaxed); }
+bool name_of(int idx, char* out, unsigned n) { return n && name_text(idx, out, n); }
+
 void clear_stale(const char* why) {
     AcquireSRWLockExclusive(&g_lock);
     const int n = g_openN;

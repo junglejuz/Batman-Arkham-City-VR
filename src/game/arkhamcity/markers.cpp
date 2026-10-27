@@ -25,6 +25,21 @@ std::atomic<bool> g_on{true};
 std::atomic<float> g_radius{0.12f}; // NDC distance from a reference point that still counts as its piece
 // Which frame's layout the HUD movie shows: 0 = the frame being drawn, 1 = the one before.
 std::atomic<int> g_lag{0};
+// MARKERLAG: the delay found automatically (render thread), its smoothed scores (NDC distance of the reticle picture from its point)
+std::atomic<bool> g_lagAuto{true};
+int g_autoLag = 0;
+float g_lagScore[4] = {};
+std::atomic<uint32_t> g_lagSwitches{0};
+// MARKERPIN (JJ 2026-10-27 night: sliding along a big grapple surface is right, "but when there's nowhere else for the reticle to go as
+// you keep moving your head, then it starts jittering. I'd like to remove that jitter"): the HUD movie eases / lags its marker in the
+// screen of a reference camera that now turns with the head, and that error went into the eye pictures as an offset. Each marker run is
+// now pinned: its first reticle picture lands exactly on the marker's world point, every later piece keeps its offset from that
+// picture. Sliding along a surface still shows (the point itself moves); screen-space easing no longer can. Render thread.
+std::atomic<bool> g_pin{true};
+uint32_t g_pinSlot = 0xFFFFFFFF, g_pinFrame = 0;
+int g_pinBest = -1;
+float g_pinX = 0.0f, g_pinY = 0.0f;
+std::atomic<uint32_t> g_pinned{0};
 // MARKERCARD (JJ 2026-10-07: markers "spin on their own axis to keep facing the camera" on head turns; that
 // should only happen when the camera turns with the mouse / pad): true = each marker is a card facing the
 // GAME camera at its object's distance, seen from each eye; false = flat in each eye's picture (facing
@@ -118,8 +133,10 @@ bool project(const float vp[16], const float w[3], float out[4]) {
 // MARKERUPRIGHT: an upright card at W, the size the game laid the marker out at, seen from this eye. Returns the map
 // from a reference-picture point (NDC, y up; the head-free game camera's picture) to this eye's clip space,
 // clip = K0 + x*Kx + y*Ky - exact perspective (a plane maps linearly to clip space).
+// RETICLESURF: axR / axU given = the card lies along those axes (the surface under the aim reticle), sized for dist world units
+// along the aim ray; the upright / facing rules below are skipped.
 bool upright_card(const float bVp[16], const float eVp[16], const float W[3], float rx, float ry, float K0[4], float Kx[4],
-                  float Ky[4]) {
+                  float Ky[4], const float* axR = nullptr, const float* axU = nullptr, float dist = 0.0f) {
     // Gradients of the base clip x / y / w over world position = P00 * camera right, P11 * camera up, camera forward
     // (the base lens is symmetric).
     const float gx[3] = {bVp[0], bVp[4], bVp[8]}, gy[3] = {bVp[1], bVp[5], bVp[9]}, gw[3] = {bVp[3], bVp[7], bVp[11]};
@@ -136,6 +153,11 @@ bool upright_card(const float bVp[16], const float eVp[16], const float W[3], fl
     const float bw = W[0] * gw[0] + W[1] * gw[1] + W[2] * gw[2] + bVp[15];
     if (!(bw > 1e-3f)) return false;
     float sx = bw / p00, sy = bw / p11;
+    if (axR && axU) {
+        memcpy(right, axR, sizeof(right));
+        memcpy(up, axU, sizeof(up));
+        if (dist > 0.0f) { sx = dist / p00; sy = dist / p11; }
+    } else
     // MARKERFACE (JJ 2026-10-11: "shouldn't the markers and the reticles face the camera rather than ... facing straight
     // out like the rest of the HUD?"): the card tilts to face the GAME camera's position (head-free, so head moves still
     // change nothing); its right edge stays level (no roll). Size fitted so the game camera sees exactly the game's layout.
@@ -217,6 +239,81 @@ struct Base {
     bool ok = false;
 };
 Base g_bases[kSets]; // the head-free game camera per game frame (written once per frame by the first eye pass)
+// HEADAIM2: the head's centre ray per game frame while head aim steers (game thread writes, render thread reads), the ray each
+// queued march used, and the latest point found along a head ray (render thread writes, game thread reads).
+struct Ray {
+    std::atomic<uint32_t> frame{0xFFFFFFFF};
+    float o[3], d[3];
+};
+Ray g_rays[kSets];
+float g_aimStageRay[4][6] = {};
+bool g_aimStageHead[4] = {};
+// RETICLESURF (JJ 2026-10-27 night: the reticle "looks like it's shifting along a plane that is perpendicular to the direction Batman is
+// facing. It would be good if the reticle changed its orientation depending on the object that's behind it ... and the orientation of
+// that object"): the march also returns the depth 4 px around its hit; with that pass's view-projection the surface's facing is
+// rebuilt (render thread), smoothed, and the aim reticle card lies in that surface. Depth edges (a 8 px span longer than a fifth of
+// the distance, or lopsided) keep the last facing; nothing yet = the card faces the aim ray.
+std::atomic<bool> g_aimSurface{false}; // JJ 22:3x: "the reticle now wobbles all over the place" - rejected, kept off (no switch)
+// RETICLESPHERE (JJ 2026-10-27 night: "make it conform to an invisible sphere surrounding Batman ... at the HUD distance, the same
+// distance that the actual reticle is at, because I don't want the reticle going to infinity"): the aim reticle sits on a sphere of
+// the HUD panel's radius around the aim ray's start (your eyes while head aim steers, else the game camera), where the aim ray meets
+// it, as a card facing you (level, upright). The depth march still runs for AIMDEPTH's steering.
+std::atomic<bool> g_aimSphere{true};
+std::atomic<float> g_sphereUU{0.0f};
+bool unproject(const float inv[16], float x, float y, float z, float out[3]); // below
+float g_aimStageVp[4][16] = {};
+float g_aimStageWH[4][2] = {};
+float g_surfN[3] = {};
+bool g_surfValid = false;
+ULONGLONG g_surfMs = 0;
+float g_surfDist = 0.0f;
+std::atomic<uint32_t> g_surfReads{0}, g_surfEdges{0}, g_surfCards{0};
+// Pixel + depth -> world, through the inverse of the pass's view-projection.
+bool surf_point(const float inv[16], float px, float py, float d, float w, float h, float out[3]) {
+    return unproject(inv, px / w * 2.0f - 1.0f, 1.0f - py / h * 2.0f, d, out);
+}
+void surf_update(const uint32_t r[8], uint32_t stage, float dist) {
+    float inv[16];
+    if (!invert4(g_aimStageVp[stage], inv)) return;
+    const float w = g_aimStageWH[stage][0], h = g_aimStageWH[stage][1];
+    const float px = float(r[1]) + 0.5f, py = float(r[2]) + 0.5f;
+    float d[5];
+    memcpy(d, r + 3, sizeof d); // +x, -x, +y, -y, centre
+    float P[5][3];
+    const float off[5][2] = {{4, 0}, {-4, 0}, {0, 4}, {0, -4}, {0, 0}};
+    for (int i = 0; i < 5; ++i)
+        if (!(d[i] > 0.0f && d[i] < 1.0f) || !surf_point(inv, px + off[i][0], py + off[i][1], d[i], w, h, P[i])) return;
+    float a[3], b[3], n[3];
+    for (int i = 0; i < 3; ++i) { a[i] = P[0][i] - P[1][i]; b[i] = P[2][i] - P[3][i]; }
+    const float la = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]), lb = sqrtf(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
+    auto half = [&](int i) { const float e[3] = {P[i][0] - P[4][0], P[i][1] - P[4][1], P[i][2] - P[4][2]}; return sqrtf(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]); };
+    const float hx0 = half(0), hx1 = half(1), hy0 = half(2), hy1 = half(3);
+    const bool edge = la > 0.2f * dist || lb > 0.2f * dist || hx0 > 3.0f * hx1 + 1.0f || hx1 > 3.0f * hx0 + 1.0f ||
+                      hy0 > 3.0f * hy1 + 1.0f || hy1 > 3.0f * hy0 + 1.0f;
+    g_surfReads.fetch_add(1, std::memory_order_relaxed);
+    if (edge) { g_surfEdges.fetch_add(1, std::memory_order_relaxed); return; }
+    n[0] = a[1] * b[2] - a[2] * b[1]; n[1] = a[2] * b[0] - a[0] * b[2]; n[2] = a[0] * b[1] - a[1] * b[0];
+    const float ln = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (!(ln > 1e-6f)) return;
+    const float* ray = g_aimStageRay[stage];
+    float dot = 0.0f;
+    for (int i = 0; i < 3; ++i) { n[i] /= ln; dot += n[i] * ray[3 + i]; }
+    if (dot > 0.0f) for (float& v : n) v = -v; // toward the viewer
+    const bool keep = g_surfValid && GetTickCount64() - g_surfMs < 300 && fabsf(dist - g_surfDist) < 0.25f * g_surfDist;
+    if (keep) { // smoothed: the march lands on a slightly different pixel every pass
+        float s = 0.0f;
+        for (int i = 0; i < 3; ++i) { n[i] = g_surfN[i] + (n[i] - g_surfN[i]) * 0.35f; s += n[i] * n[i]; }
+        s = sqrtf(s);
+        if (!(s > 1e-6f)) return;
+        for (float& v : n) v /= s;
+    }
+    memcpy(g_surfN, n, sizeof n);
+    g_surfValid = true; g_surfMs = GetTickCount64(); g_surfDist = dist;
+}
+SRWLOCK g_headPtLock = SRWLOCK_INIT;
+float g_headPt[3] = {};
+ULONGLONG g_headPtMs = 0;
+std::atomic<uint32_t> g_headRayPasses{0};
 
 bool unproject(const float inv[16], float x, float y, float z, float out[3]) {
     float c[4];
@@ -459,14 +556,21 @@ bool aim_ensure(ID3D11Device* dev) {
         "Texture2D<float> D : register(t0);\n"
         "cbuffer C : register(b0) { float4 P; float4 S[96]; };\n"
         "RWBuffer<uint> R : register(u0);\n"
+        "float Dat(int2 p) { return D.Load(int3(clamp(p, int2(0, 0), int2(P.xy) - 1), 0)); }\n"
         "[numthreads(1, 1, 1)] void main() {\n"
         "  uint hit = 0xFFFF;\n"
+        "  int2 h = int2(0, 0);\n"
         "  for (uint i = 0; i < (uint)P.z; ++i) {\n"
         "    float4 q = S[i];\n"
         "    if (q.w < 0.5 || q.x < 0 || q.y < 0 || q.x >= P.x || q.y >= P.y) continue;\n"
-        "    if (q.z >= D.Load(int3(int2(q.xy), 0))) { hit = i; break; }\n"
+        "    if (q.z >= D.Load(int3(int2(q.xy), 0))) { hit = i; h = int2(q.xy); break; }\n"
         "  }\n"
         "  R[0] = hit;\n"
+        // RETICLESURF: the surface around the hit (4 px each way) for its orientation
+        "  R[1] = (uint)h.x; R[2] = (uint)h.y;\n"
+        "  R[3] = asuint(Dat(h + int2(4, 0))); R[4] = asuint(Dat(h - int2(4, 0)));\n"
+        "  R[5] = asuint(Dat(h + int2(0, 4))); R[6] = asuint(Dat(h - int2(0, 4)));\n"
+        "  R[7] = asuint(Dat(h));\n"
         "}\n";
     ID3DBlob* b = nullptr;
     ID3DBlob* err = nullptr;
@@ -478,14 +582,14 @@ bool aim_ensure(ID3D11Device* dev) {
         err->Release();
     }
     D3D11_BUFFER_DESC cd{16 + kAimN * 16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
-    D3D11_BUFFER_DESC od{4, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, 0, 0};
-    D3D11_BUFFER_DESC sd{4, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0};
+    D3D11_BUFFER_DESC od{32, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, 0, 0};
+    D3D11_BUFFER_DESC sd{32, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0};
     ok = ok && SUCCEEDED(dev->CreateBuffer(&cd, nullptr, &g_aimCb)) && SUCCEEDED(dev->CreateBuffer(&od, nullptr, &g_aimOut));
     if (ok) {
         D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
         ud.Format = DXGI_FORMAT_R32_UINT;
         ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-        ud.Buffer.NumElements = 1;
+        ud.Buffer.NumElements = 8;
         ok = SUCCEEDED(dev->CreateUnorderedAccessView(g_aimOut, &ud, &g_aimUav));
     }
     for (int i = 0; i < 4 && ok; ++i) ok = SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_aimStage[i]));
@@ -498,8 +602,9 @@ bool aim_ensure(ID3D11Device* dev) {
     return true;
 }
 
-// Once per eye pass while the reticle shows: read an older answer, then queue this pass's march.
-void aim_pass(ID3D11DeviceContext* ctx, const float eyeVp[16], const Base& base, float vpW, float vpH) {
+// Once per eye pass while the reticle shows: read an older answer, then queue this pass's march along the ray o + dir x d
+// (the game camera's centre ray, or the head's while head aim steers).
+void aim_pass(ID3D11DeviceContext* ctx, const float eyeVp[16], const float o[3], const float dir[3], bool head, float vpW, float vpH) {
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
     if (!dev) return;
@@ -509,20 +614,27 @@ void aim_pass(ID3D11DeviceContext* ctx, const float eyeVp[16], const Base& base,
         const uint32_t r = (g_aimK - 3) % 4;
         D3D11_MAPPED_SUBRESOURCE ms{};
         if (ctx->Map(g_aimStage[r], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &ms) == S_OK) {
-            const uint32_t hit = *static_cast<const uint32_t*>(ms.pData);
+            uint32_t res[8];
+            memcpy(res, ms.pData, sizeof res);
+            const uint32_t hit = res[0];
             ctx->Unmap(g_aimStage[r], 0);
+            if (hit < uint32_t(kAimN) && g_aimSurface.load(std::memory_order_relaxed))
+                surf_update(res, r, aim_sample_dist(g_aimStageMin[r], int(hit))); // RETICLESURF
             g_aimReads.fetch_add(1, std::memory_order_relaxed);
-            if (hit < uint32_t(kAimN)) {
-                g_aimDist.store(aim_sample_dist(g_aimStageMin[r], int(hit)), std::memory_order_relaxed);
-            } else {
-                g_aimSky.fetch_add(1, std::memory_order_relaxed);
-                g_aimDist.store(aim_sample_dist(g_aimStageMin[r], kAimN - 1), std::memory_order_relaxed);
+            const float dist = aim_sample_dist(g_aimStageMin[r], hit < uint32_t(kAimN) ? int(hit) : kAimN - 1);
+            if (hit >= uint32_t(kAimN)) g_aimSky.fetch_add(1, std::memory_order_relaxed);
+            g_aimDist.store(dist, std::memory_order_relaxed);
+            if (g_aimStageHead[r]) { // HEADAIM2: the looked-at point, for the controller steering
+                const float* s = g_aimStageRay[r];
+                AcquireSRWLockExclusive(&g_headPtLock);
+                for (int i = 0; i < 3; ++i) g_headPt[i] = s[i] + s[3 + i] * dist;
+                g_headPtMs = GetTickCount64();
+                ReleaseSRWLockExclusive(&g_headPtLock);
             }
         }
     }
     ID3D11Resource* depth = bvr::gfx_hud::scene_depth();
-    float o[3], dir[3];
-    if (!ready || !depth || !aim_ray(base, o, dir)) {
+    if (!ready || !depth) {
         dev->Release();
         return;
     }
@@ -581,6 +693,10 @@ void aim_pass(ID3D11DeviceContext* ctx, const float eyeVp[16], const Base& base,
     const uint32_t w = g_aimK % 4;
     ctx->CopyResource(g_aimStage[w], g_aimOut);
     g_aimStageMin[w] = minD;
+    for (int i = 0; i < 3; ++i) { g_aimStageRay[w][i] = o[i]; g_aimStageRay[w][3 + i] = dir[i]; }
+    g_aimStageHead[w] = head;
+    memcpy(g_aimStageVp[w], eyeVp, sizeof g_aimStageVp[w]); // RETICLESURF
+    g_aimStageWH[w][0] = vpW; g_aimStageWH[w][1] = vpH;
     ++g_aimK;
     g_aimDispatches.fetch_add(1, std::memory_order_relaxed);
     ctx->CSSetShader(oCs, nullptr, 0);
@@ -648,6 +764,25 @@ void on_project(int eye, uint32_t frame, const float world[3], float out[4]) {
 
 void set_render_slot(uint32_t slot) { g_renderSlot.store(slot, std::memory_order_relaxed); }
 
+void set_aim_ray(uint32_t frame, const float origin[3], const float dir[3]) {
+    Ray& r = g_rays[frame % kSets];
+    r.frame.store(0xFFFFFFFF, std::memory_order_relaxed);
+    if (!origin || !dir) return;
+    memcpy(r.o, origin, sizeof(r.o));
+    memcpy(r.d, dir, sizeof(r.d));
+    r.frame.store(frame, std::memory_order_release);
+}
+
+void set_reticle_sphere(float radiusUU) { g_sphereUU.store(radiusUU, std::memory_order_relaxed); }
+
+bool aim_point(float out[3]) {
+    AcquireSRWLockShared(&g_headPtLock);
+    const bool ok = g_headPtMs && GetTickCount64() - g_headPtMs < 150;
+    if (ok) memcpy(out, g_headPt, sizeof(g_headPt));
+    ReleaseSRWLockShared(&g_headPtLock);
+    return ok;
+}
+
 bool on_hud_draw(ID3D11DeviceContext* ctx) {
     if (!g_on.load(std::memory_order_relaxed)) return false;
     const uint32_t slot = g_renderSlot.load(std::memory_order_relaxed);
@@ -703,28 +838,61 @@ bool on_hud_draw(ID3D11DeviceContext* ctx) {
     const float* bInv = nullptr;
     bool have = false;
     bool grapple = false; // RETICLEHD: a grapple-marker piece (sharp texture swapped in when it is drawn)
+    float surfR[3] = {}, surfU[3] = {}, surfAt = 0.0f; // RETICLESURF: the aim reticle's surface axes (surfAt > 0 = use them)
     const HdEntry* entry = nullptr;
     if (slot != g_runSlot) { g_runSlot = slot; g_runOn = false; } // RETICLERUN: runs never cross a pass
-    // 1) World markers: points the HUD script projected this frame (Canvas.Project).
-    const uint32_t f = p.frame - static_cast<uint32_t>(g_lag.load(std::memory_order_relaxed));
+    // 1) World markers: points the HUD script projected (Canvas.Project), in the frame whose layout the movie is drawing.
+    // MARKERLAG (JJ 2026-10-27 night: the grapple marker the head found should "lock on to the object instead of sliding along it as
+    // you keep moving your head"): since MARKERSTEER the reference camera turns with the head, so a movie layout one frame older than
+    // the set we look up slides the marker by the head's turn per frame. The reticle's own picture sits on its point: per piece, the
+    // nearest reference among the last 4 frames is scored (smoothed), and the frame delay with the lowest score is used for every piece.
+    const float r = g_radius.load(std::memory_order_relaxed);
+    int lagBest[4] = {-1, -1, -1, -1};
+    float lagD[4] = {};
+    for (uint32_t L = 0; L < 4; ++L) {
+        const uint32_t fl = p.frame - L;
+        const Set& sl = g_sets[fl % kSets];
+        if (sl.frame.load(std::memory_order_acquire) != fl) continue;
+        const int nl = sl.n.load(std::memory_order_acquire);
+        float bd = r * r;
+        for (int i = 0; i < nl; ++i) {
+            if (!sl.onScreen[i]) continue;
+            const float dx = tx - sl.ref[i][0], dy = ty - sl.ref[i][1], d = dx * dx + dy * dy;
+            if (d <= bd) { bd = d; lagBest[L] = i; }
+        }
+        lagD[L] = bd;
+    }
+    bool anyLag = false;
+    for (int L = 0; L < 4; ++L) anyLag |= lagBest[L] >= 0;
+    if (anyLag) entry = piece_entry(ctx, false);
+    if (anyLag && g_lagAuto.load(std::memory_order_relaxed) && is_reticle_key(entry)) {
+        for (int L = 0; L < 4; ++L) g_lagScore[L] = g_lagScore[L] * 0.9f + 0.1f * (lagBest[L] >= 0 ? sqrtf(lagD[L]) : r);
+        int bestL = g_autoLag;
+        for (int L = 0; L < 4; ++L) if (g_lagScore[L] < 0.8f * g_lagScore[bestL]) bestL = L;
+        if (bestL != g_autoLag && g_lagSwitches.fetch_add(1, std::memory_order_relaxed) < 8)
+            BVR_LOG("[bc] marker frame delay %d -> %d (scores %.4f %.4f %.4f %.4f)", g_autoLag, bestL, g_lagScore[0], g_lagScore[1],
+                    g_lagScore[2], g_lagScore[3]);
+        g_autoLag = bestL;
+    }
+    int useL = g_lagAuto.load(std::memory_order_relaxed) ? g_autoLag : g_lag.load(std::memory_order_relaxed);
+    if (lagBest[useL] < 0) for (int L = 0; L < 4; ++L) if (lagBest[L] >= 0) { useL = L; break; } // nothing at that delay: nearest
+    const uint32_t f = p.frame - static_cast<uint32_t>(useL);
     const Set& s = g_sets[f % kSets];
     if (s.frame.load(std::memory_order_acquire) == f) {
-        const int n = s.n.load(std::memory_order_acquire);
-        const float r = g_radius.load(std::memory_order_relaxed);
-        int best = -1;
-        float bestD = r * r;
-        for (int i = 0; i < n; ++i) {
-            if (!s.onScreen[i]) continue;
-            const float dx = tx - s.ref[i][0], dy = ty - s.ref[i][1], d = dx * dx + dy * dy;
-            if (d <= bestD) { bestD = d; best = i; }
-        }
+        int best = lagBest[useL];
         if (best >= 0) {
             // RETICLERUN: only the reticle's own pictures start a run; other pieces only continue one.
-            entry = piece_entry(ctx, false);
             // MASKSTOP: a run carries at most 8 pieces past the last reticle picture (RB prompt + its fills), so a
             // HUD group drawn after the reticle near the same point (the compass) never rides along.
             static int s_runLeft = 0;
-            if (is_reticle_key(entry)) { g_runOn = true; s_runLeft = 8; }
+            if (is_reticle_key(entry)) {
+                // MARKERPIN: the run's first reticle picture is the marker's anchor (its point on the object)
+                if (!g_runOn || g_pinSlot != slot || g_pinFrame != f || g_pinBest != best) {
+                    g_pinSlot = slot; g_pinFrame = f; g_pinBest = best; g_pinX = tx; g_pinY = ty;
+                }
+                g_runOn = true;
+                s_runLeft = 8;
+            }
             else if (g_runOn && (multiply || --s_runLeft < 0)) g_runOn = false; // MASKSTOP2: multiply ends a run
             if (!g_runOn) {
                 best = -1;
@@ -737,6 +905,12 @@ bool on_hud_draw(ID3D11DeviceContext* ctx) {
             memcpy(world, s.world[best], sizeof(world));
             rx = s.ref[best][0];
             ry = s.ref[best][1];
+            if (g_pin.load(std::memory_order_relaxed) && g_pinSlot == slot && g_pinFrame == f && g_pinBest == best) {
+                // MARKERPIN: the anchor picture lands exactly on the point; the other pieces keep their place relative to it
+                rx = g_pinX;
+                ry = g_pinY;
+                g_pinned.fetch_add(1, std::memory_order_relaxed);
+            }
             if (s.baseOk) { bVp = s.baseVp; bInv = s.baseInv; }
             grapple = true;
             have = true;
@@ -746,23 +920,68 @@ bool on_hud_draw(ID3D11DeviceContext* ctx) {
     const float ar = g_aimReach.load(std::memory_order_relaxed);
     if (!have && g_aimOn.load(std::memory_order_relaxed) && tx * tx + ty * ty <= ar * ar && reticle_texture(ctx)) {
         const Base& b = g_bases[p.frame % kSets];
-        if (b.frame.load(std::memory_order_acquire) == p.frame && b.ok) {
+        float o[3], dir[3];
+        // HEADAIM2: while head aim steers, the reticle sits where the HEAD points (the game's camera now looks there too)
+        const Ray& hr = g_rays[p.frame % kSets];
+        const bool head = hr.frame.load(std::memory_order_acquire) == p.frame;
+        if (head) { memcpy(o, hr.o, sizeof(o)); memcpy(dir, hr.d, sizeof(dir)); }
+        if (b.frame.load(std::memory_order_acquire) == p.frame && b.ok && (head || aim_ray(b, o, dir))) {
             if (g_aimDoneSlot != slot && !g_aimNoPass.load(std::memory_order_relaxed)) {
                 g_aimDoneSlot = slot;
                 D3D11_VIEWPORT vp{};
                 UINT nv = 1;
                 ctx->RSGetViewports(&nv, &vp);
-                if (nv == 1 && vp.Width > 0.0f) aim_pass(ctx, p.vp, b, vp.Width, vp.Height);
+                if (nv == 1 && vp.Width > 0.0f) {
+                    aim_pass(ctx, p.vp, o, dir, head, vp.Width, vp.Height);
+                    if (head) g_headRayPasses.fetch_add(1, std::memory_order_relaxed);
+                }
             }
             const float dist = g_aimDist.load(std::memory_order_relaxed);
-            float o[3], dir[3];
-            if (dist > 0.0f && aim_ray(b, o, dir)) {
-                for (int i = 0; i < 3; ++i) world[i] = o[i] + dir[i] * dist;
+            const float sphereR = g_sphereUU.load(std::memory_order_relaxed);
+            const bool sphere = g_aimSphere.load(std::memory_order_relaxed) && sphereR > 1.0f; // RETICLESPHERE
+            const bool surf = !sphere && g_aimSurface.load(std::memory_order_relaxed) && g_surfValid && GetTickCount64() - g_surfMs < 250;
+            if (dist > 0.0f || sphere) {
+                const float at = sphere ? sphereR : dist;
+                for (int i = 0; i < 3; ++i) world[i] = o[i] + dir[i] * at;
                 bVp = b.vp;
                 bInv = b.inv;
                 have = true;
+                if (sphere || surf) {
+                    // RETICLESPHERE: the card faces back along the aim ray (tangent to the sphere). RETICLESURF (test): the card in
+                    // the surface's plane. Right level (or the camera's right looking straight up / down), up toward the sky (or
+                    // away from you); a surface seen nearly edge-on is turned partly toward you.
+                    float n[3], v[3] = {-dir[0], -dir[1], -dir[2]}, c = 0.0f;
+                    for (int i = 0; i < 3; ++i) { n[i] = sphere ? v[i] : g_surfN[i]; c += n[i] * v[i]; }
+                    if (c < 0.45f) {
+                        const float t = fminf((0.45f - c) / 0.45f, 1.0f) * 0.7f;
+                        float s = 0.0f;
+                        for (int i = 0; i < 3; ++i) { n[i] = n[i] * (1.0f - t) + v[i] * t; s += n[i] * n[i]; }
+                        s = sqrtf(s);
+                        for (float& x : n) x /= s;
+                    }
+                    float gx[3] = {b.vp[0], b.vp[4], b.vp[8]};
+                    const float lg = sqrtf(gx[0] * gx[0] + gx[1] * gx[1] + gx[2] * gx[2]);
+                    for (float& x : gx) x /= lg;
+                    float r[3] = {n[1], -n[0], 0.0f};
+                    float lr = sqrtf(r[0] * r[0] + r[1] * r[1]);
+                    if (lr < 0.2f) { // floor / ceiling: the camera's right laid into the surface
+                        const float k = gx[0] * n[0] + gx[1] * n[1] + gx[2] * n[2];
+                        for (int i = 0; i < 3; ++i) r[i] = gx[i] - n[i] * k;
+                        lr = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+                    }
+                    if (lr > 1e-4f) {
+                        for (float& x : r) x /= lr;
+                        if (r[0] * gx[0] + r[1] * gx[1] + r[2] * gx[2] < 0.0f) for (float& x : r) x = -x;
+                        float u[3] = {r[1] * n[2] - r[2] * n[1], r[2] * n[0] - r[0] * n[2], r[0] * n[1] - r[1] * n[0]};
+                        const bool flip = fabsf(u[2]) >= 0.2f ? u[2] < 0.0f : u[0] * dir[0] + u[1] * dir[1] + u[2] * dir[2] < 0.0f;
+                        if (flip) for (float& x : u) x = -x;
+                        memcpy(surfR, r, sizeof surfR);
+                        memcpy(surfU, u, sizeof surfU);
+                        surfAt = at;
+                    }
+                }
                 if (g_aimPieces.fetch_add(1, std::memory_order_relaxed) % 2000 == 0)
-                    BVR_LOG("[bc] aim depth: reticle piece placed at %.0f game units (piece %u)", dist, g_aimPieces.load());
+                    BVR_LOG("[bc] aim depth: reticle piece placed at %.0f game units (piece %u, %s)", at, g_aimPieces.load(), sphere ? "on the HUD-distance sphere" : "at the surface");
             }
         }
     }
@@ -790,7 +1009,9 @@ bool on_hud_draw(ID3D11DeviceContext* ctx) {
     bool upright = false;
     if (g_card.load(std::memory_order_relaxed) && g_upright.load(std::memory_order_relaxed) && bVp) {
         float K0[4], Kx[4], Ky[4];
-        if (upright_card(bVp, p.vp, world, rx, ry, K0, Kx, Ky)) {
+        if (surfAt > 0.0f) g_surfCards.fetch_add(1, std::memory_order_relaxed);
+        if (surfAt > 0.0f ? upright_card(bVp, p.vp, world, rx, ry, K0, Kx, Ky, surfR, surfU, surfAt)
+                          : upright_card(bVp, p.vp, world, rx, ry, K0, Kx, Ky)) {
             float r0[4], r1[4], r3[4];
             for (int j = 0; j < 4; ++j) {
                 r0[j] = m[0] * Kx[j] + m[1] * Ky[j];
@@ -880,8 +1101,18 @@ void draw_ui() {
         if (bvr::overlay::show_tests() && ImGui::Checkbox("   markers stand upright in exact perspective (Arkham Knight fix)", &upr)) g_upright.store(upr);
         bool face = g_face.load();
         if (bvr::overlay::show_tests() && ImGui::Checkbox("   ... tilted to face the game camera", &face)) g_face.store(face);
+        bool pn = g_pin.load(); // MARKERPIN
+        if (bvr::overlay::show_tests() && ImGui::Checkbox("   markers pinned to their point on the object (no screen easing)", &pn))
+            g_pin.store(pn);
+        if (bvr::overlay::show_tests()) ImGui::TextDisabled("   pinned pieces %u", g_pinned.load());
+        bool la = g_lagAuto.load(); // MARKERLAG
+        if (bvr::overlay::show_tests() && ImGui::Checkbox("   markers find their frame delay automatically (lock onto the object)", &la))
+            g_lagAuto.store(la);
         int lag = g_lag.load();
-        if (bvr::overlay::show_tests() && bvr::overlay::SliderStepInt("   marker frame lag", &lag, 0, 1)) g_lag.store(lag);
+        if (bvr::overlay::show_tests() && !la && bvr::overlay::SliderStepInt("   marker frame lag", &lag, 0, 3)) g_lag.store(lag);
+        if (bvr::overlay::show_tests() && la)
+            ImGui::TextDisabled("   frame delay in use %d (scores %.3f %.3f %.3f %.3f, switches %u)", g_autoLag, g_lagScore[0], g_lagScore[1],
+                                g_lagScore[2], g_lagScore[3], g_lagSwitches.load());
         if (bvr::overlay::show_tests()) ImGui::TextDisabled("   moved pieces %u, last shift %.3f, %.3f", g_pieces.load(), g_lastDx.load(), g_lastDy.load());
     }
     bool hd = g_hdOn.load();
@@ -893,6 +1124,11 @@ void draw_ui() {
     bool aim = g_aimOn.load();
     if (ImGui::Checkbox("batarang / batclaw aim reticle sits on what it points at", &aim)) g_aimOn.store(aim);
     if (g_aimOn.load()) {
+        bool sp = g_aimSphere.load(); // RETICLESPHERE
+        if (ImGui::Checkbox("   aim reticle floats at the HUD's distance, facing you  (off = on what it points at)", &sp)) g_aimSphere.store(sp);
+        if (bvr::overlay::show_tests())
+            ImGui::TextDisabled("   reticle sphere radius %.0f game units, reticle pieces turned to face you %u", g_sphereUU.load(),
+                                g_surfCards.load());
         float mn = g_aimMin.load();
         if (bvr::overlay::show_tests() && bvr::overlay::SliderStep("   ignore surfaces nearer than (game units)", &mn, 50.0f, 800.0f, "%.0f")) g_aimMin.store(mn);
         if (bvr::overlay::show_tests()) ImGui::TextDisabled("   last target distance %.0f game units, reticle pieces placed %u", g_aimDist.load(),
@@ -913,9 +1149,10 @@ void status_text(std::string& out) {
     out += buf;
     snprintf(buf, sizeof(buf),
              "AIMDEPTH on %d min %.0f reach %.2f | passes %u, answers %u (no surface %u), last distance %.1f, reticle pieces "
-             "placed %u%s\n",
+             "placed %u, along the head's ray %u | surface reads %u, edges %u, on the surface %u%s\n",
              g_aimOn.load() ? 1 : 0, g_aimMin.load(), g_aimReach.load(), g_aimDispatches.load(), g_aimReads.load(),
-             g_aimSky.load(), g_aimDist.load(), g_aimPieces.load(), g_aimFailed ? " | SETUP FAILED" : "");
+             g_aimSky.load(), g_aimDist.load(), g_aimPieces.load(), g_headRayPasses.load(), g_surfReads.load(), g_surfEdges.load(),
+             g_surfCards.load(), g_aimFailed ? " | SETUP FAILED" : "");
     out += buf;
     for (uint32_t k = 0; k < kSets; ++k) {
         const Set& s = g_sets[k];
@@ -940,6 +1177,9 @@ void settings_write(std::string& out) {
     out += g_hdOn.load() ? "reticle_hd=1\n" : "reticle_hd=0\n";
     out += g_upright.load() ? "marker_upright=1\n" : "marker_upright=0\n";
     out += g_face.load() ? "marker_face=1\n" : "marker_face=0\n";
+    out += g_aimSphere.load() ? "aim_sphere=1\n" : "aim_sphere=0\n";
+    out += g_lagAuto.load() ? "marker_lag_auto=1\n" : "marker_lag_auto=0\n"; // MARKERLAG
+    out += g_pin.load() ? "marker_pin=1\n" : "marker_pin=0\n";                 // MARKERPIN // the surface test switch is not saved
 }
 
 bool settings_read(const char* key, const char* val) {
@@ -949,8 +1189,12 @@ bool settings_read(const char* key, const char* val) {
     else if (!strcmp(key, "marker_card")) g_card.store(atoi(val) != 0);
     else if (!strcmp(key, "marker_upright")) g_upright.store(atoi(val) != 0);
     else if (!strcmp(key, "marker_face")) g_face.store(atoi(val) != 0);
-    else if (!strcmp(key, "marker_lag")) { const int l = atoi(val); g_lag.store(l == 1 ? 1 : 0); }
+    else if (!strcmp(key, "marker_lag")) { const int l = atoi(val); g_lag.store(l >= 0 && l <= 3 ? l : 0); }
+    else if (!strcmp(key, "marker_lag_auto")) g_lagAuto.store(atoi(val) != 0); // MARKERLAG
+    else if (!strcmp(key, "marker_pin")) g_pin.store(atoi(val) != 0);          // MARKERPIN
     else if (!strcmp(key, "aim_depth")) g_aimOn.store(atoi(val) != 0);
+    else if (!strcmp(key, "aim_surface")) {} // RETICLESURF: a test now, old value ignored
+    else if (!strcmp(key, "aim_sphere")) g_aimSphere.store(atoi(val) != 0); // RETICLESPHERE
     else if (!strcmp(key, "reticle_hd")) g_hdOn.store(atoi(val) != 0);
     else if (!strcmp(key, "aim_nopass")) { g_aimNoPass.store(atoi(val) != 0); if (g_aimDist.load() <= 0.0f) g_aimDist.store(850.0f); }
     else if (!strcmp(key, "aim_min")) { if (f >= 50.0f && f <= 800.0f) g_aimMin.store(f); }

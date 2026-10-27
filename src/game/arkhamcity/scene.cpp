@@ -30,6 +30,7 @@
 #include <imgui.h>
 #include <intrin.h>
 #include <windows.h>
+#include <tlhelp32.h>
 
 #include <atomic>
 #include <cmath>
@@ -641,7 +642,50 @@ void stick_flush() {
     for (StickKey& s : g_stick)
         if (s.pending && now - s.since >= kStickWaitMs && !bvr::input::game_pad_blocked()) deliver_press(s);
 }
+// PADSEEN (2026-10-27 night; HEADAIM2 LIVE 21:54: the aim reticle showed - the left trigger WAS held - yet head aim never engaged,
+// and the stick read as idle while JJ turned it): City's pad does not reach the XInput bridge (Steam Input), so its composed trigger /
+// stick values stay 0. Here, where every lane arrives, the left trigger and the right stick are recognised by their key names.
+enum PadKind : uint8_t { kPadUnknown = 0, kPadOther, kPadLtKey, kPadLtAxis, kPadRightX, kPadRightY };
+struct PadName { int idx; bool axis; PadKind kind; };
+PadName g_padNames[128];
+int g_padNameN = 0, g_padNamesLogged = 0;
+bool g_padLtDown = false;
+ULONGLONG g_padLtMs = 0, g_padStickMs = 0; // last time the trigger was seen pressed / a right-stick axis arrived
+float g_padRx = 0.0f, g_padRy = 0.0f;
+PadKind pad_kind(int idx, bool axis) {
+    for (int i = 0; i < g_padNameN; ++i)
+        if (g_padNames[i].idx == idx && g_padNames[i].axis == axis) return g_padNames[i].kind;
+    char t[64];
+    if (!menu_state::name_of(idx, t, sizeof t)) return kPadUnknown; // name table not found yet: asked again next time
+    PadKind k = kPadOther;
+    if (strstr(t, "LeftTrigger")) k = axis ? kPadLtAxis : kPadLtKey;
+    else if (axis && strstr(t, "RightX")) k = kPadRightX;
+    else if (axis && strstr(t, "RightY")) k = kPadRightY;
+    if (g_padNameN < 128) g_padNames[g_padNameN++] = PadName{idx, axis, k};
+    if (g_padNamesLogged < 40) {
+        ++g_padNamesLogged;
+        BVR_LOG("[bc] pad input seen: %s (%s)%s", t, axis ? "axis" : "button", k >= kPadLtKey ? " - used by head aim" : "");
+    }
+    return k;
+}
+void pad_note_key(int n0, int ev, int pad) {
+    if (!pad) return;
+    if (pad_kind(n0, false) == kPadLtKey) {
+        g_padLtDown = ev != kIE_Released;
+        if (g_padLtDown) g_padLtMs = GetTickCount64();
+    }
+}
+void pad_note_axis(int n0, float d, int pad) {
+    if (!pad) return;
+    switch (pad_kind(n0, true)) {
+    case kPadLtAxis: if (d > 0.12f) g_padLtMs = GetTickCount64(); break;
+    case kPadRightX: g_padRx = d; g_padStickMs = GetTickCount64(); break;
+    case kPadRightY: g_padRy = d; g_padStickMs = GetTickCount64(); break;
+    default: break;
+    }
+}
 int __fastcall input_key_detour(void* self, void* edx, void* vp, int ctrl, int n0, int n1, int ev, float amt, int pad) {
+    pad_note_key(n0, ev, pad); // PADSEEN
     const int k = stick_slot(n0);
     if (k >= 0) {
         StickKey& s = g_stick[k];
@@ -691,6 +735,7 @@ int __fastcall input_key_detour(void* self, void* edx, void* vp, int ctrl, int n
     return g_inputKeyOrig(self, edx, vp, ctrl, n0, n1, ev, amt, pad);
 }
 int __fastcall input_axis_detour(void* self, void* edx, void* vp, int ctrl, int n0, int n1, float d, float dt, int pad) {
+    pad_note_axis(n0, d, pad); // PADSEEN
     if (bvr::input::game_pad_blocked()) {
         g_engineBlocked.fetch_add(1, std::memory_order_relaxed);
         return 1;
@@ -1007,6 +1052,11 @@ void __fastcall draw_detour(void* self, void* edx, uint32_t a1) {    const uint3
     g_afwFrame = doubling && afw::on();
     g_eyeSign = g_afwFrame ? (g_afwNext ? +1 : -1) : doubling ? -1 : 0;
     label_next_begin(g_eyeSign, g_afwFrame);
+    {   // RETICLESPHERE: the aim reticle's sphere = the HUD panel's distance (seen size in the headset: metres x world scale)
+        float hd = 0.0f, hw = 0.0f, hu = 0.0f;
+        bvr::vr::get_hud_quad(&hd, &hw, &hu);
+        markers::set_reticle_sphere(hd * g_uuPerM.load(std::memory_order_relaxed));
+    }
     g_drawOrig(self, edx, a1);
     if (g_afwFrame && g_viewThisDraw) {
         afw::note_drawn(g_afwNext);
@@ -1248,6 +1298,25 @@ int g_fpPawnOff = 0;           // controller field that holds the pawn (found li
 float g_fpEye[3] = {};
 bool g_fpEyeValid = false;     // this frame's eye point (game thread, before the ctor)
 std::atomic<uint32_t> g_fpFrames{0};
+// LEANBACK (JJ 2026-10-27: "When in first person mode and I move my physical head back my virtual camera is moving through Batman's
+// head"; port of Origins first_person.cpp clamp_eye): the headset's own movement is added on top of the eye point fp_forward in front
+// of his face, so leaning back that far puts the lens inside his head. The final eye may come no nearer than this to his eye point
+// along the push direction (level); sideways / up / down stay free. Per view: set by fp_apply when it moved this view to his eyes.
+std::atomic<float> g_fpLeanMinCm{15.0f};
+bool g_fpLeanView = false;     // this view is drawn in first person with a level push direction (render of the current ctor)
+float g_fpLeanHead[2] = {}, g_fpLeanDir[2] = {};
+std::atomic<uint32_t> g_fpLeanClamps{0};
+// CAMPOS (JJ 2026-10-25: "put the adjustable camera from our Arkham Knight mod panel into the other 3 arkham mods"; AKVR
+// TPOFFSET, akvr camera.cpp / hooks.cpp "camera position"): the third-person camera shifted left / right, down / up,
+// back / forward, along the game camera's LEVEL heading and world up, so it never swings with the head. Gameplay only,
+// through FPGATE's checks (title screen, movies, menus, game camera away from Batman); not in first person.
+std::atomic<float> g_camRightCm{0.0f}, g_camUpCm{0.0f}, g_camFwdCm{0.0f};
+std::atomic<uint32_t> g_camFrames{0};
+bool g_camValid = false;       // this frame's third-person shift allowed (game thread, before the ctor)
+bool cam_offset_set() {
+    return g_camRightCm.load(std::memory_order_relaxed) != 0.0f || g_camUpCm.load(std::memory_order_relaxed) != 0.0f ||
+           g_camFwdCm.load(std::memory_order_relaxed) != 0.0f;
+}
 constexpr int kPCPawnScanBegin = 0x1AC, kPCSize = 0x590, kPawnController = 0x1CC, kPawnLocation = 0x48,
               kPawnEyeHeight = 0x2A8, kPawnSizeMin = 0x444;
 // HEADCAM (JJ 2026-10-11: "we need the camera attached to the head ... when flying the head comes forward and it goes
@@ -1278,9 +1347,207 @@ bool fp_object(uintptr_t p, unsigned bytes) {
     return vt >= 0x401000 && vt < 0x1800000; // a C++ object of the exe (vtable in its image)
 }
 
+// HEADAIM (JJ 2026-10-27: "I want the head aiming in Arkham City also"): the first try (Godoy301's Asylum PR #1 + AIMLEVEL) wrote
+// the head's look into Controller.Rotation every frame - confirmed and active (LIVE 21:33), yet JJ: "the head aiming is not working",
+// exactly as Origins' first try.
+// HEADAIM2 (JJ 2026-10-27 night: "We need to do the same thing with this game as with Arkham Origins for first person and third
+// person"): Origins first_person.cpp AIMSTATE / AIMDEPTH / AIM3P (HEADSET there). Controller.Rotation is the camera's own state
+// (classic UE3: the stick turns it, the camera and Batman's aim follow), so while the left trigger is held it is steered to the head's
+// look: each pair, body = controller - our last yaw (stick turns kept), body pitch = the pitch when the trigger went down (never
+// drifts), controller = body x head; both eyes render from the body basis (no double head); the release writes the body back.
+// City's Controller.Rotation is at Actor +0x54 (Location +0x48 + 0xC): AIMCHECK confirms it against the game camera's heading for 30
+// frames in a row before any write, so a wrong guess never touches the game.
+constexpr int kCtrlRotation = 0x54;
+struct FpRot { int32_t pitch, yaw, roll; };
+std::atomic<bool> g_fpLookAim{true};    // first person
+std::atomic<bool> g_aim3p{true};        // AIM3P: third person
+bool g_aimValidated = false, g_aimRefused = false;
+int g_aimOk = 0, g_aimBad = 0;
+bool g_stActive = false;                // the controller is being steered (game thread)
+uintptr_t g_stPc = 0;
+int32_t g_stYawOffset = 0, g_stPitch = 0; // our yaw contribution, the body's pitch (frozen at the trigger press)
+FpRot g_stTarget{};                       // the look last written into the controller
+uintptr_t g_fpPc = 0;                   // this frame's controller (game thread, fp_update)
+bool g_fpPairAimed = false;             // this pair renders from g_fpBody
+float g_fpBody[3][3] = {};              // this pair's body basis (view columns right, up, forward), both eyes
+// AIMDEPTH (Origins, JJ "a lot more accurate"): the game fires from ITS camera (over the right shoulder), so a look parallel to ours
+// lands above / right. The controller is turned so the game camera's ray passes through the point the head looks at (markers.cpp
+// depth march along the head's centre ray while steering); no point (not aiming yet, too near) = parallel.
+float g_pairGameO[3] = {};              // this pair's game camera position, before any change of ours
+// AIM3P (Origins): in third person the game camera ORBITS Batman with the controller, so steered by the head it would swing round
+// him; each pair is drawn from where the camera would be for the stick's own direction (the camera's offset from his eye point, in
+// its own frame, laid along the body basis), and after the release the same until the camera is back on the stick (<= 1.5 s).
+float g_tpBody[3][3] = {}, g_tpPos[3] = {};
+bool g_tpComp = false;
+ULONGLONG g_tpCompUntil = 0, g_ltLastMs = 0;
+std::atomic<uint32_t> g_aimWrites{0}, g_aimFailures{0}, g_depthAims{0}, g_plainAims{0}, g_tpPairs{0};
+int32_t aim_wrap(int64_t n) { const uint32_t u = uint32_t(n) & 65535u; return u >= 32768 ? int32_t(u) - 65536 : int32_t(u); }
+float aim_rad(int32_t n) { return float(aim_wrap(n)) * (2 * kPi / 65536); }
+int32_t aim_units(float r) { return aim_wrap(int64_t(lroundf(r * (65536 / (2 * kPi))))); }
+bool aim_read(uintptr_t pc, FpRot& r) {
+    if (!fp_object(pc, kPCSize)) return false;
+    __try { memcpy(&r, reinterpret_cast<const void*>(pc + kCtrlRotation), sizeof r); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool aim_write(uintptr_t pc, const FpRot& r) {
+    __try { memcpy(reinterpret_cast<void*>(pc + kCtrlRotation), &r, sizeof r); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// AIMTRIGGER (Origins, AKVR): the left trigger held, or within 0.3 s.
+// PADSEEN: the engine's own input (Steam Input pads) or the XInput bridge's composed pad.
+bool left_trigger_held() {
+    uint8_t lt = 0;
+    bvr::input::last_composed_triggers(&lt, nullptr);
+    const ULONGLONG now = GetTickCount64();
+    if (lt > 30 || g_padLtDown) g_ltLastMs = now;
+    if (g_padLtMs > g_ltLastMs) g_ltLastMs = g_padLtMs;
+    return g_ltLastMs && now - g_ltLastMs < 300;
+}
+// The right stick: |x| / |y| (0..1) from the engine when it reported within 0.5 s, else the composed pad.
+void right_stick(float& x, float& y) {
+    if (GetTickCount64() - g_padStickMs < 500) { x = fabsf(g_padRx); y = fabsf(g_padRy); return; }
+    int16_t rx = 0, ry = 0;
+    bvr::input::last_composed_sticks(nullptr, nullptr, &rx, &ry);
+    x = fabsf(float(rx)) / 32767.0f; y = fabsf(float(ry)) / 32767.0f;
+}
+bool aim_wanted() { return left_trigger_held(); }
+// A rotator as view-matrix columns (right, up, forward), row-vector convention as the scene view; roll ignored.
+void aim_basis(const FpRot& b, float m[3][3]) {
+    const float p = aim_rad(b.pitch), y = aim_rad(b.yaw), cp = cosf(p), sp = sinf(p), cy = cosf(y), sy = sinf(y);
+    m[0][0] = -sy;      m[1][0] = cy;       m[2][0] = 0;
+    m[0][1] = -sp * cy; m[1][1] = -sp * sy; m[2][1] = cp;
+    m[0][2] = cp * cy;  m[1][2] = cp * sy;  m[2][2] = sp;
+}
+FpRot aim_look(const float f[3]) {
+    FpRot r{};
+    r.yaw = aim_units(atan2f(f[1], f[0]));
+    r.pitch = aim_units(atan2f(f[2], sqrtf(f[0] * f[0] + f[1] * f[1])));
+    return r;
+}
+// The head's look from a basis: forward = column 2 of B x R (R = the head rotation eye_delta() renders with).
+void aim_head_forward(const float B[3][3], const bvr::vr::HeadPose& head, float f[3]) {
+    float R[3][3];
+    head_rotation_view(head, R);
+    for (int i = 0; i < 3; ++i) { f[i] = 0; for (int k = 0; k < 3; ++k) f[i] += B[i][k] * R[k][2]; }
+}
+bool head_finite(const bvr::vr::HeadPose& h) {
+    return std::isfinite(h.qx) && std::isfinite(h.qy) && std::isfinite(h.qz) && std::isfinite(h.qw);
+}
+void aim_release(const char* why) {
+    if (!g_stActive) return;
+    FpRot cur{};
+    bool ok = aim_read(g_stPc, cur);
+    if (ok) { cur.yaw = aim_wrap(int64_t(cur.yaw) - g_stYawOffset); cur.pitch = g_stPitch; ok = aim_write(g_stPc, cur); }
+    if (!ok) g_aimFailures.fetch_add(1, std::memory_order_relaxed);
+    BVR_LOG("[bc] head aim released (%s): the stick's own direction is back in the controller%s", why, ok ? "" : " - FAILED");
+    g_stActive = false; g_stPc = 0; g_stYawOffset = 0;
+}
+// AIMCHECK: every first eye in gameplay until confirmed (or refused) - the value's yaw against the game camera's heading.
+void aim_check(const M4& view, uintptr_t pc) {
+    if (g_aimValidated || g_aimRefused || !pc || g_stActive) return;
+    FpRot cur{};
+    if (!aim_read(pc, cur)) return;
+    const float camYaw = atan2f(view.m[1][2], view.m[0][2]) * 180 / kPi, rotYaw = float(aim_wrap(cur.yaw)) * 360 / 65536;
+    float d = fabsf(camYaw - rotYaw); if (d > 180) d = 360 - d;
+    // In third person the camera can trail the controller through turns: only a value that NEVER matched is refused.
+    static bool s_everMatched = false;
+    if (d < 4.0f) {
+        s_everMatched = true;
+        if (++g_aimOk >= 30) { g_aimValidated = true; BVR_LOG("[bc] head aim: Controller.Rotation at +0x%X confirmed (matches the game camera's heading for 30 frames)", kCtrlRotation); }
+    } else {
+        g_aimOk = 0;
+        if (++g_aimBad >= 600 && !s_everMatched) { g_aimRefused = true; BVR_LOG("[bc] head aim: Controller.Rotation at +0x%X does NOT match the game camera (camera yaw %.1f, value %.1f) - head aim stays off", kCtrlRotation, camYaw, rotYaw); }
+    }
+}
+// AIMSTATE, a pair's first eye: steer the controller to the head's look; true = this pair renders from g_fpBody.
+// full = aiming (left trigger): yaw too, through the looked-at point. LOOKSTEER (not aiming): pitch only, or yaw too when the
+// player chose it (the controller's yaw is also where the stick walks him).
+bool aim_drive(uintptr_t pc, const bvr::vr::HeadPose& head, bool full, bool yawToo) {
+    if (g_stActive && g_stPc != pc) aim_release("controller changed");
+    if (!head_finite(head)) return false;
+    FpRot cur{};
+    if (!aim_read(pc, cur)) { aim_release("controller unreadable"); return false; }
+    FpRot body = cur;
+    if (g_stActive) {
+        body.yaw = aim_wrap(int64_t(cur.yaw) - g_stYawOffset); // stick turns since the last pair stay
+        // Stick up / down while steering: taken only while the stick is pushed up / down, so the game's own pitch limit
+        // pulling our written look back never drifts the body (Asylum's "stuck looking at the ground").
+        float sx = 0.0f, sy = 0.0f;
+        right_stick(sx, sy);
+        if (sy > 0.2f) {
+            const int32_t p = aim_wrap(int64_t(g_stPitch) + aim_wrap(int64_t(cur.pitch) - g_stTarget.pitch));
+            g_stPitch = p > 12743 ? 12743 : p < -12743 ? -12743 : p; // +-70 deg
+        }
+    } else g_stPitch = aim_wrap(cur.pitch);
+    body.pitch = g_stPitch;
+    body.roll = 0;
+    float B[3][3], f[3];
+    aim_basis(body, B);
+    aim_head_forward(B, head, f);
+    FpRot look = aim_look(f);
+    float P[3];
+    if (!full) {}
+    else if (markers::aim_point(P)) { // AIMDEPTH: from the game camera through the looked-at point
+        const float d[3] = {P[0] - g_pairGameO[0], P[1] - g_pairGameO[1], P[2] - g_pairGameO[2]};
+        const float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (len > 100.0f && d[0] * f[0] + d[1] * f[1] + d[2] * f[2] > 0.9f * len) { look = aim_look(d); g_depthAims.fetch_add(1, std::memory_order_relaxed); }
+        else g_plainAims.fetch_add(1, std::memory_order_relaxed);
+    } else g_plainAims.fetch_add(1, std::memory_order_relaxed);
+    FpRot target = cur;
+    target.yaw = full || yawToo ? look.yaw : body.yaw;
+    target.pitch = look.pitch;
+    FpRot back{};
+    if (!aim_write(pc, target) || !aim_read(pc, back) || back.yaw != target.yaw || back.pitch != target.pitch) {
+        g_aimFailures.fetch_add(1, std::memory_order_relaxed);
+        aim_write(pc, cur);
+        aim_release("write failed");
+        return false;
+    }
+    static int s_mode = 0, s_modeLogs = 0; // 1 aiming, 2 looking (LOOKSTEER)
+    if (!g_stActive) s_mode = 0;
+    if (s_mode != (full ? 1 : 2) && s_modeLogs < 40) {
+        ++s_modeLogs;
+        if (full) BVR_LOG("[bc] head aim active: Batman's controller follows your look (controller %08X, body pitch %d)", unsigned(pc), g_stPitch);
+        else BVR_LOG("[bc] head look steering: the game camera follows your head %s (grapple points), drawn from the stick's view",
+                     yawToo ? "up / down and left / right" : "up / down");
+    }
+    s_mode = full ? 1 : 2;
+    g_stYawOffset = aim_wrap(int64_t(target.yaw) - body.yaw);
+    g_stTarget = target;
+    g_stActive = true; g_stPc = pc;
+    memcpy(g_fpBody, B, sizeof B);
+    g_aimWrites.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+// LOOKSTEER + MARKERSTEER (JJ 2026-10-27 night: "if I look up, I want the reticles to show up on the objects that I can attach to without
+// having to necessarily use the gamepad stick"; HEADSET JJ 23:2x "That looks fantastic now"): City picks grapple points from its CAMERA
+// (READWATCH: every reader in the game tick), and the camera follows the controller. So while the trigger is up the head steers the
+// controller's pitch (yaw too with "also left / right": the stick then walks him where he looks), drawn from the body basis like
+// AIMSTATE so the view never moves; the marker reference takes the steered camera (MARKERSTEER, ctor_detour) and markers are pinned to
+// their point (markers.cpp MARKERPIN / MARKERLAG). Tried and dropped the same night (BATMAN_CITY_PLAN, HEADAIM2 .. MARKERPIN): the
+// head's look written into the camera's view record between frames (no effect), into the camera actor's facing while the HUD is drawn
+// (no effect) or between frames (it feeds the camera: the view spun).
+std::atomic<bool> g_lookTargets{true};
+std::atomic<bool> g_lookYaw{false};
+bool g_fpPairFull = false; // this pair steers for aiming (trigger): the reticle follows the head's ray
+// LOOKSTEER third person: the game camera's boom changes with its pitch (looking up brings it down toward the ground). Its offset from
+// his eye point, in its own frame, is sampled only while the steered camera is within 5 deg of the body basis, and laid along the body
+// basis while the head looks elsewhere - the view does not move when the head looks up.
+float g_tpOffset[3] = {};
+bool g_tpOffsetValid = false;
+bool g_lookOk = false; // this frame passed FPGATE with Batman found (fp_update)
+
 void fp_update() {
     g_fpEyeValid = false;
-    if (!g_fp.load(std::memory_order_relaxed) || !g_localPlayer) return;
+    g_camValid = false;
+    g_fpPc = 0;
+    g_lookOk = false;
+    const bool fp = g_fp.load(std::memory_order_relaxed);
+    const bool aim3p = !fp && g_aim3p.load(std::memory_order_relaxed); // AIM3P
+    const bool look = g_lookTargets.load(std::memory_order_relaxed); // LOOKSTEER
+    if (!look && (fp ? !g_fpLookAim.load(std::memory_order_relaxed) : !aim3p)) aim_release(fp ? "head aim off" : "third-person head aim off");
+    if ((!fp && !cam_offset_set() && !aim3p && !look) || !g_localPlayer) return;
     __try {
         const uintptr_t pc = *reinterpret_cast<const uintptr_t*>(static_cast<const uint8_t*>(g_localPlayer) + 0x30);
         if (!fp_object(pc, kPCSize)) return;
@@ -1324,13 +1591,16 @@ void fp_update() {
                               : !(dist < maxUU)                 ? "game camera far from Batman"
                                                                 : nullptr;
             static const char* s_why = "";
-            if ((why ? why : "") != s_why) {
+            if (fp && (why ? why : "") != s_why) {
                 s_why = why ? why : "";
                 BVR_LOG("[bc] first person %s%s (game camera %.1f m from his eyes)", why ? "paused: " : "", why ? why : "active again",
                         dist / g_uuPerM.load(std::memory_order_relaxed));
             }
-            if (why) return; // the game's own camera this frame
+            if (why) { aim_release(why); g_tpCompUntil = 0; return; } // the game's own camera this frame
         }
+        g_fpPc = pc;      // HEADAIM2: this frame's controller
+        g_lookOk = true;  // LOOKTARGETS: gameplay with Batman near the camera
+        if (!fp) { g_camValid = true; return; } // third person (CAMPOS, AIM3P): same gate, his eye point without the head bone
         g_fpEyeValid = true;
         fp_head_follow(pawn); // HEADCAM: g_fpEye moved with his head
         static bool s_logged = false;
@@ -1341,6 +1611,7 @@ void fp_update() {
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_fpEyeValid = false;
+        g_camValid = false;
     }
 }
 
@@ -1385,8 +1656,96 @@ void fp_head_follow(uintptr_t pawn) { // game thread, inside fp_update's __try
 
 // The game camera's view matrix (row vectors: v_view = (v - origin) * R, translation row = -origin * R) moved to the
 // eye point. Columns of R: 0 right, 1 up, 2 forward (world).
+// CAMPOS: the camera origin moved along the level right (column 0) / level forward (column 2) and world up.
+void cam_apply(M4& view) {
+    float rx = view.m[0][0], ry = view.m[1][0];
+    float len = sqrtf(rx * rx + ry * ry);
+    if (len < 1e-3f) return; // rolled on its side: no level heading
+    rx /= len; ry /= len;
+    float fx = view.m[0][2], fy = view.m[1][2];
+    len = sqrtf(fx * fx + fy * fy);
+    if (len > 1e-3f) { fx /= len; fy /= len; } else { fx = ry; fy = -rx; } // straight down / up: forward from right
+    const float uu = g_uuPerM.load(std::memory_order_relaxed) * 0.01f; // per cm
+    const float r = g_camRightCm.load(std::memory_order_relaxed) * uu, f = g_camFwdCm.load(std::memory_order_relaxed) * uu,
+                u = g_camUpCm.load(std::memory_order_relaxed) * uu;
+    float o[3];
+    for (int i = 0; i < 3; ++i) o[i] = -(view.m[3][0] * view.m[i][0] + view.m[3][1] * view.m[i][1] + view.m[3][2] * view.m[i][2]);
+    const float n[3] = {o[0] + rx * r + fx * f, o[1] + ry * r + fy * f, o[2] + u};
+    for (int j = 0; j < 3; ++j) view.m[3][j] = -(n[0] * view.m[0][j] + n[1] * view.m[1][j] + n[2] * view.m[2][j]);
+    g_camFrames.fetch_add(1, std::memory_order_relaxed);
+}
 void fp_apply(M4& view) {
-    if (!g_fpEyeValid) return;
+    const bool firstEye = g_eyeSign <= 0 || g_afwFrame; // HEADAIM2: decided once per pair, on its first view
+    if (firstEye) g_fpPairAimed = false;
+    g_fpLeanView = false; // LEANBACK: set again below only when this view is moved to his eyes
+    if (!g_fpEyeValid && !g_camValid) {
+        if (firstEye) { aim_release("no Batman / menu"); g_tpComp = false; g_tpCompUntil = 0; g_tpOffsetValid = false; g_fpPairFull = false; }
+        return;
+    }
+    float og[3];
+    for (int i = 0; i < 3; ++i) og[i] = -(view.m[3][0] * view.m[i][0] + view.m[3][1] * view.m[i][1] + view.m[3][2] * view.m[i][2]);
+    const bool headOk = g_poseValid && head_finite(g_pose);
+    if (firstEye) {
+        for (int i = 0; i < 3; ++i) g_pairGameO[i] = og[i]; // AIMDEPTH: the game's own camera, the start of its aim
+        aim_check(view, g_fpPc);
+    }
+    if (g_camValid) { // third person: AIM3P, then CAMPOS
+        if (firstEye) {
+            const bool full = g_aim3p.load(std::memory_order_relaxed) && aim_wanted();
+            const bool look = !full && g_lookTargets.load(std::memory_order_relaxed); // LOOKSTEER: grapple points where you look
+            g_fpPairFull = false;
+            if ((full || look) && headOk && g_aimValidated && g_fpPc) {
+                g_fpPairAimed = aim_drive(g_fpPc, g_pose, full, g_lookYaw.load(std::memory_order_relaxed));
+                g_fpPairFull = g_fpPairAimed && full;
+            } else aim_release(g_aim3p.load(std::memory_order_relaxed) || g_lookTargets.load(std::memory_order_relaxed)
+                                   ? "left trigger released" : "third-person head aim off");
+            const ULONGLONG now = GetTickCount64();
+            g_tpComp = false;
+            FpRot cr{};
+            if (g_fpPairAimed) { memcpy(g_tpBody, g_fpBody, sizeof g_tpBody); g_tpCompUntil = now + 1500; g_tpComp = true; }
+            else if (g_tpCompUntil && now < g_tpCompUntil && aim_read(g_fpPc, cr)) { // the camera catching up with the stick
+                cr.roll = 0;
+                aim_basis(cr, g_tpBody);
+                const float dotF = view.m[0][2] * g_tpBody[0][2] + view.m[1][2] * g_tpBody[1][2] + view.m[2][2] * g_tpBody[2][2];
+                if (dotF > 0.99996f) g_tpCompUntil = 0; // within ~0.5 deg: the game camera is the stick's again
+                else g_tpComp = true;
+            } else g_tpCompUntil = 0;
+            if (!g_tpComp) g_tpOffsetValid = false;
+            if (g_tpComp) { // where the camera would be for the body's direction: its offset in its own frame, laid along the body
+                float loc[3];
+                for (int j = 0; j < 3; ++j)
+                    loc[j] = (og[0] - g_fpEye[0]) * view.m[0][j] + (og[1] - g_fpEye[1]) * view.m[1][j] + (og[2] - g_fpEye[2]) * view.m[2][j];
+                if (g_fpPairAimed && !g_fpPairFull) { // LOOKSTEER: the boom as it is for the body's own direction
+                    const float dotF = view.m[0][2] * g_tpBody[0][2] + view.m[1][2] * g_tpBody[1][2] + view.m[2][2] * g_tpBody[2][2];
+                    if (dotF > 0.9962f || !g_tpOffsetValid) { memcpy(g_tpOffset, loc, sizeof loc); g_tpOffsetValid = true; } // 5 deg
+                    else memcpy(loc, g_tpOffset, sizeof loc);
+                } else g_tpOffsetValid = false; // aiming: the game's own (over-the-shoulder) boom
+                for (int i = 0; i < 3; ++i)
+                    g_tpPos[i] = g_fpEye[i] + loc[0] * g_tpBody[i][0] + loc[1] * g_tpBody[i][1] + loc[2] * g_tpBody[i][2];
+                g_tpPairs.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        if (g_tpComp) {
+            for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) view.m[i][j] = g_tpBody[i][j];
+            for (int j = 0; j < 3; ++j)
+                view.m[3][j] = -(g_tpPos[0] * view.m[0][j] + g_tpPos[1] * view.m[1][j] + g_tpPos[2] * view.m[2][j]);
+        }
+        if (cam_offset_set()) cam_apply(view); // CAMPOS
+        return;
+    }
+    // First person. HEADAIM2: both eyes render from the body basis; eye_delta() then adds the full head rotation once.
+    if (firstEye) {
+        g_tpComp = false; g_tpCompUntil = 0; g_tpOffsetValid = false;
+        const bool full = g_fpLookAim.load(std::memory_order_relaxed) && aim_wanted();
+        const bool look = !full && g_lookTargets.load(std::memory_order_relaxed); // LOOKSTEER: grapple points where you look
+        g_fpPairFull = false;
+        if ((full || look) && headOk && g_aimValidated && g_fpPc) {
+            g_fpPairAimed = aim_drive(g_fpPc, g_pose, full, g_lookYaw.load(std::memory_order_relaxed));
+            g_fpPairFull = g_fpPairAimed && full;
+        } else aim_release(g_fpLookAim.load(std::memory_order_relaxed) || g_lookTargets.load(std::memory_order_relaxed)
+                               ? "left trigger released" : "head aim off");
+    }
+    if (g_fpPairAimed) for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) view.m[i][j] = g_fpBody[i][j];
     float fx = view.m[0][2], fy = view.m[1][2];
     const float len = sqrtf(fx * fx + fy * fy);
     if (len > 1e-3f) { fx /= len; fy /= len; } else { fx = fy = 0.0f; } // straight down / up: no forward push
@@ -1394,7 +1753,29 @@ void fp_apply(M4& view) {
     const float fwd = g_fpFwdCm.load(std::memory_order_relaxed) * uu, up = g_fpUpCm.load(std::memory_order_relaxed) * uu;
     const float o[3] = {g_fpEye[0] + fx * fwd, g_fpEye[1] + fy * fwd, g_fpEye[2] + up};
     for (int j = 0; j < 3; ++j) view.m[3][j] = -(o[0] * view.m[0][j] + o[1] * view.m[1][j] + o[2] * view.m[2][j]);
+    g_fpLeanView = len > 1e-3f; // LEANBACK: his eye point before the push, and the level direction it was pushed along
+    g_fpLeanHead[0] = g_fpEye[0]; g_fpLeanHead[1] = g_fpEye[1];
+    g_fpLeanDir[0] = fx; g_fpLeanDir[1] = fy;
     g_fpFrames.fetch_add(1, std::memory_order_relaxed);
+}
+// LEANBACK: an eye's FINAL view (headset delta, position included) pushed forward along the level push if leaning back brought its
+// origin nearer than min(fp_lean_min, fp_forward) to his eye point. Returns the translation-row change (to keep delta in step).
+bool fp_clamp_eye(M4& v, float dRow[3]) {
+    if (!g_fpLeanView) return false;
+    const float uu = g_uuPerM.load(std::memory_order_relaxed) * 0.01f; // per cm
+    const float minF = fminf(g_fpLeanMinCm.load(std::memory_order_relaxed), g_fpFwdCm.load(std::memory_order_relaxed)) * uu;
+    float o[3];
+    for (int i = 0; i < 3; ++i) o[i] = -(v.m[3][0] * v.m[i][0] + v.m[3][1] * v.m[i][1] + v.m[3][2] * v.m[i][2]);
+    const float s = (o[0] - g_fpLeanHead[0]) * g_fpLeanDir[0] + (o[1] - g_fpLeanHead[1]) * g_fpLeanDir[1];
+    if (!(s < minF)) return false;
+    o[0] += (minF - s) * g_fpLeanDir[0]; o[1] += (minF - s) * g_fpLeanDir[1];
+    for (int j = 0; j < 3; ++j) {
+        const float t = -(o[0] * v.m[0][j] + o[1] * v.m[1][j] + o[2] * v.m[2][j]);
+        if (dRow) dRow[j] = t - v.m[3][j];
+        v.m[3][j] = t;
+    }
+    g_fpLeanClamps.fetch_add(1, std::memory_order_relaxed);
+    return true;
 }
 void set_first_person(bool on) {
     if (g_fp.exchange(on) != on) BVR_LOG("[bc] first person %s", on ? "ON" : "off");
@@ -1426,11 +1807,32 @@ void* __fastcall ctor_detour(void* self, void* edx, BC_A27) {
     M4 view, proj;
     memcpy(&view, reinterpret_cast<void*>(a14), 64);
     memcpy(&proj, reinterpret_cast<void*>(a15), 64);
+    const M4 gameView = view; // MARKERSTEER: the game camera as the game built it (steered by the head while head aim / look runs)
     fp_apply(view); // FIRSTPERSON: the camera at Batman's eyes (everything below follows the moved camera)
     if ((g_eyeSign <= 0 || g_afwFrame) && proj.m[0][0] > 0.0f) // AFW: every frame's only pass
         vision::on_game_fov(2.0f * atanf(1.0f / proj.m[0][0]) * 180.0f / kPi); // the game's OWN fov (zoom)
-    const M4 delta = eye_delta(g_pose, g_eyeSign);
-    const M4 eyeView = mul(view, delta);
+    M4 delta = eye_delta(g_pose, g_eyeSign);
+    M4 eyeView = mul(view, delta);
+    if (g_eyeSign <= 0 || g_afwFrame) { // HEADAIM2: while head aim steers, the reticle and its depth follow the head's centre ray
+        const uint32_t frame = g_draws.load(std::memory_order_relaxed);
+        if (g_fpPairAimed && g_fpPairFull) { // aiming only: LOOKSTEER keeps the game's own reticle placement
+            const M4 c = mul(view, eye_delta(g_pose, 0));
+            float co[3], cf[3];
+            for (int i = 0; i < 3; ++i) {
+                co[i] = -(c.m[3][0] * c.m[i][0] + c.m[3][1] * c.m[i][1] + c.m[3][2] * c.m[i][2]);
+                cf[i] = c.m[i][2];
+            }
+            markers::set_aim_ray(frame, co, cf);
+        } else {
+            markers::set_aim_ray(frame, nullptr, nullptr);
+        }
+    }
+    {   // LEANBACK: in first person the lens never goes back into his head when the player leans back. The same row change on
+        // delta (view's last column is 0,0,0,1) keeps the room overlays' game-camera -> eye mapping in step.
+        float dRow[3];
+        if (fp_clamp_eye(eyeView, dRow))
+            for (int j = 0; j < 3; ++j) delta.m[3][j] += dRow[j];
+    }
     // BILLBOARD: particles get the game camera's axes instead of this eye's.
     billboard::set_pass(g_gameBegins.load(std::memory_order_relaxed) - 1, &eyeView.m[0][0], &view.m[0][0]);
 
@@ -1465,7 +1867,18 @@ void* __fastcall ctor_detour(void* self, void* edx, BC_A27) {
     proj.m[2][1] = 0.0f;
     // MARKERBASE: the game camera's own view-projection (no head, no eye, symmetric) - the head-free
     // reference that HUD markers are placed from.
-    const M4 baseVp = mul(view, proj);
+    // MARKERSTEER (JJ 22:5x: a grapple point "appeared where I was looking, but it was very small and facing the wrong direction" - the
+    // head-steering phase): while the head steers the controller, the drawn view keeps the stick's direction (body basis) but the game
+    // camera - and the HUD's grapple pick - looks where the head looks. The marker reference then takes the game camera's rotation at
+    // the drawn position: Canvas.Project answers on-screen for what the head found, and the cards face that look instead of the stick's.
+    M4 baseView = view;
+    if (g_fpPairAimed) {
+        float bo[3];
+        for (int i = 0; i < 3; ++i) bo[i] = -(view.m[3][0] * view.m[i][0] + view.m[3][1] * view.m[i][1] + view.m[3][2] * view.m[i][2]);
+        for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) baseView.m[i][j] = gameView.m[i][j];
+        for (int j = 0; j < 3; ++j) baseView.m[3][j] = -(bo[0] * baseView.m[0][j] + bo[1] * baseView.m[1][j] + bo[2] * baseView.m[2][j]);
+    }
+    const M4 baseVp = mul(baseView, proj);
     const M4 projSym = proj; // AFW: the other eye's lens starts from the same symmetric lens
     // Asymmetric per-eye frustum (stereo passes only): the runtime's own eye angles, the
     // same ones core tags the layer with. Row-vector UE3 projection: clip.x = x*m00 + z*m20,
@@ -1515,7 +1928,8 @@ void* __fastcall ctor_detour(void* self, void* edx, BC_A27) {
         // AFW: the other eye from the SAME head sample (its eye offset, its own lens angles, no jitter) = where the warp
         // puts this eye's picture. All cameras from our own matrices (the ones handed to the engine), one space.
         const int os = -g_eyeSign;
-        const M4 oView = mul(view, eye_delta(g_pose, os));
+        M4 oView = mul(view, eye_delta(g_pose, os));
+        fp_clamp_eye(oView, nullptr); // LEANBACK: the other eye limited the same way
         M4 oProj = projSym;
         if (bvr::vr::asym_fov() && bvr::vr::eye_fov_angles(os < 0 ? 0 : 1, ang)) {
             const float l = tanf(ang[0]), rr = tanf(ang[1]), u = tanf(ang[2]), d = tanf(ang[3]);
@@ -1612,8 +2026,17 @@ std::string settings_text() {
     }
     {
         char fb[192];
-        snprintf(fb, sizeof(fb), "first_person=%d\nfp_forward_cm=%.1f\nfp_up_cm=%.1f\nfp_head=%d\nfp_head_smooth=%.3f\n",
-                 g_fp.load() ? 1 : 0, g_fpFwdCm.load(), g_fpUpCm.load(), g_fpHead.load() ? 1 : 0, g_fpHeadSmoothS.load());
+        snprintf(fb, sizeof(fb), "first_person=%d\nfp_forward_cm=%.1f\nfp_up_cm=%.1f\nfp_head=%d\nfp_head_smooth=%.3f\nfp_look_aim=%d\n",
+                 g_fp.load() ? 1 : 0, g_fpFwdCm.load(), g_fpUpCm.load(), g_fpHead.load() ? 1 : 0, g_fpHeadSmoothS.load(),
+                 g_fpLookAim.load() ? 1 : 0);
+        s += fb;
+        snprintf(fb, sizeof(fb), "fp_lean_min_cm=%.1f\n", g_fpLeanMinCm.load()); // LEANBACK
+        s += fb;
+        snprintf(fb, sizeof(fb), "fp_look_aim_3p=%d\nlook_targets=%d\nlook_targets_yaw=%d\n", g_aim3p.load() ? 1 : 0,
+                 g_lookTargets.load() ? 1 : 0, g_lookYaw.load() ? 1 : 0); // HEADAIM2, LOOKSTEER
+        s += fb;
+        snprintf(fb, sizeof(fb), "cam_right_cm=%.1f\ncam_up_cm=%.1f\ncam_forward_cm=%.1f\n", g_camRightCm.load(),
+                 g_camUpCm.load(), g_camFwdCm.load()); // CAMPOS
         s += fb;
     }
     s += "hud_eye_depth=" + std::to_string(bvr::vr::hud_eyes()) + "\n";
@@ -1724,8 +2147,16 @@ void settings_load() {
         else if (!strcmp(k, "first_person")) g_fp.store(on);
         else if (!strcmp(k, "fp_forward_cm")) { if (v >= -20.0f && v <= 80.0f) g_fpFwdCm.store(v); }
         else if (!strcmp(k, "fp_up_cm")) { if (v >= -40.0f && v <= 40.0f) g_fpUpCm.store(v); }
+        else if (!strcmp(k, "fp_lean_min_cm")) { if (v >= 0.0f && v <= 40.0f) g_fpLeanMinCm.store(v); } // LEANBACK
         else if (!strcmp(k, "fp_head")) g_fpHead.store(on); // HEADCAM
+        else if (!strcmp(k, "fp_look_aim")) g_fpLookAim.store(on); // HEADAIM
+        else if (!strcmp(k, "fp_look_aim_3p")) g_aim3p.store(on);  // AIM3P
+        else if (!strcmp(k, "look_targets")) g_lookTargets.store(on); // LOOKTARGETS
+        else if (!strcmp(k, "look_targets_yaw")) g_lookYaw.store(on); // LOOKSTEER
         else if (!strcmp(k, "fp_head_smooth")) { if (v >= 0.0f && v <= 1.0f) g_fpHeadSmoothS.store(v); }
+        else if (!strcmp(k, "cam_right_cm")) { if (v >= -300.0f && v <= 300.0f) g_camRightCm.store(v); } // CAMPOS
+        else if (!strcmp(k, "cam_up_cm")) { if (v >= -300.0f && v <= 300.0f) g_camUpCm.store(v); }
+        else if (!strcmp(k, "cam_forward_cm")) { if (v >= -300.0f && v <= 300.0f) g_camFwdCm.store(v); }
         else if (!strncmp(k, "hud_zone_", 9)) {
             float zs = 1, zx = 0, zy = 0;
             if (sscanf_s(val, "%f,%f,%f", &zs, &zx, &zy) == 3 && zs >= 0.3f && zs <= 1.5f && fabsf(zx) <= 0.6f && fabsf(zy) <= 0.6f)
@@ -1974,6 +2405,25 @@ bool handle_command(const char* args) {
     else if (starts("fp head ")) { g_fpHead.store(atoi(args + 8) != 0); BVR_LOG("[bc] first person head follow %s", g_fpHead.load() ? "ON" : "off"); }
     else if (starts("fp smooth ")) { g_fpHeadSmoothS.store(static_cast<float>(atof(args + 10))); BVR_LOG("[bc] first person head smoothing %.3f s", g_fpHeadSmoothS.load()); }
     else if (starts("fp up ")) { g_fpUpCm.store(static_cast<float>(atof(args + 6))); BVR_LOG("[bc] first person up %.1f cm", g_fpUpCm.load()); }
+    else if (starts("fp lean ")) { // LEANBACK: "fp lean <cm>" closest the lens comes to his face when leaning back
+        g_fpLeanMinCm.store(fminf(fmaxf(static_cast<float>(atof(args + 8)), 0.0f), 40.0f));
+        BVR_LOG("[bc] first person lean-back limit %.1f cm (limited views so far %u)", g_fpLeanMinCm.load(), g_fpLeanClamps.load());
+    }
+    else if (starts("fp cam ")) { // CAMPOS: "fp cam <right> <up> <forward>" (cm)
+        float r = 0, u = 0, f = 0;
+        if (sscanf_s(args + 7, "%f %f %f", &r, &u, &f) == 3) { g_camRightCm.store(r); g_camUpCm.store(u); g_camFwdCm.store(f); }
+        BVR_LOG("[bc] camera position right %.0f, up %.0f, forward %.0f cm (moved frames %u)", g_camRightCm.load(),
+                g_camUpCm.load(), g_camFwdCm.load(), g_camFrames.load());
+    }
+    else if (starts("aim3p ")) { g_aim3p.store(!strncmp(args + 6, "on", 2)); BVR_LOG("[bc] third-person head aim %s", g_aim3p.load() ? "ON" : "off"); }
+    else if (starts("looktargets ")) { g_lookTargets.store(!strncmp(args + 12, "on", 2)); BVR_LOG("[bc] look targets %s", g_lookTargets.load() ? "ON" : "off"); }
+    else if (starts("lookyaw ")) { g_lookYaw.store(!strncmp(args + 8, "on", 2)); BVR_LOG("[bc] look steering left / right %s", g_lookYaw.load() ? "ON" : "off"); }
+    else if (starts("aim status")) { // HEADAIM2
+        BVR_LOG("[bc] head aim: confirmed %d refused %d, %s, writes %u failures %u, through the point %u / parallel %u, third-person pairs %u | "
+                "grapple points where you look %s (left / right %s)", g_aimValidated ? 1 : 0, g_aimRefused ? 1 : 0,
+                g_stActive ? "steering" : "idle", g_aimWrites.load(), g_aimFailures.load(), g_depthAims.load(), g_plainAims.load(),
+                g_tpPairs.load(), g_lookTargets.load() ? "ON" : "off", g_lookYaw.load() ? "on" : "off");
+    }
     else if (starts("movieband off")) window::set_movie_band(false);
     else if (starts("glow ")) glow::command(args + 5);
     else if (starts("hudzone ")) { // "hudzone Z size dx dy" (test)
@@ -2058,10 +2508,41 @@ void draw_ui() {
     {   // FIRSTPERSON: at the top, it changes the whole view
         bool fp = g_fp.load();
         if (ImGui::Checkbox("FIRST PERSON  (or click both sticks twice quickly)", &fp)) set_first_person(fp);
+        // HEADAIM2 (Origins): head aim in both views; LOOKTARGETS: grapple points where you look
+        if (fp) {
+            bool aim = g_fpLookAim.load();
+            if (ImGui::Checkbox("   aim with your head while holding the left trigger (gadgets, batclaw)", &aim)) g_fpLookAim.store(aim);
+        } else {
+            bool a3 = g_aim3p.load();
+            if (ImGui::Checkbox("   aim with your head while holding the left trigger (third person)", &a3)) g_aim3p.store(a3);
+        }
+        if (g_fp.load() ? g_fpLookAim.load() : g_aim3p.load())
+            ImGui::TextDisabled(g_aimRefused ? "      not available: could not confirm where the game keeps his aim" :
+                                g_aimValidated ? "      gadgets go where you look while the trigger is held" :
+                                                 "      starts once he stands still for a moment (checking the game first)");
+        bool lt = g_lookTargets.load();
+        if (ImGui::Checkbox("   grapple points appear where you look  (no trigger needed)", &lt)) g_lookTargets.store(lt);
+        if (lt) {
+            bool ly = g_lookYaw.load();
+            if (ImGui::Checkbox("      also left / right  (the stick then walks Batman where you look)", &ly)) g_lookYaw.store(ly);
+            ImGui::TextDisabled("      the game camera follows your head; your view stays where the stick puts it");
+        }
+        if (bvr::overlay::show_tests()) {
+            ImGui::TextDisabled("      head aim: confirmed %d (ok %d / mismatches %d), %s, writes %u, failures %u, through the looked-at "
+                                "point %u / parallel %u, third-person pairs %u", g_aimValidated ? 1 : 0, g_aimOk, g_aimBad,
+                                g_stActive ? "steering" : "idle", g_aimWrites.load(), g_aimFailures.load(), g_depthAims.load(),
+                                g_plainAims.load(), g_tpPairs.load());
+            ImGui::TextDisabled("      left trigger %s, right stick %s", left_trigger_held() ? "HELD" : "up",
+                                GetTickCount64() - g_padStickMs < 500 ? "seen by the game" : "not seen yet");
+        }
         if (fp) {
             float f = g_fpFwdCm.load(), u = g_fpUpCm.load();
             if (bvr::overlay::SliderStep("   camera in front of his face (cm)", &f, -20.0f, 80.0f, "%.0f")) g_fpFwdCm.store(f);
             if (bvr::overlay::SliderStep("   camera up / down (cm)", &u, -40.0f, 40.0f, "%.0f")) g_fpUpCm.store(u);
+            float lb = g_fpLeanMinCm.load(); // LEANBACK
+            if (bvr::overlay::SliderStep("   closest to his face when you lean back (cm)", &lb, 0.0f, 40.0f, "%.0f")) g_fpLeanMinCm.store(lb);
+            if (bvr::overlay::show_tests())
+                ImGui::TextDisabled("      lean-back limit used on %u views", g_fpLeanClamps.load());
             bool hf = g_fpHead.load(); // HEADCAM
             if (ImGui::Checkbox("   camera follows his head (gliding, animations)", &hf)) g_fpHead.store(hf);
             if (hf) {
@@ -2079,6 +2560,17 @@ void draw_ui() {
     ImGui::SetNextItemOpen(true, ImGuiCond_Once);
     if (ImGui::CollapsingHeader("STEREO RENDERING")) afw::draw_ui();
     if (ImGui::CollapsingHeader("VIEW")) {
+        ImGui::SetNextItemOpen(true, ImGuiCond_Once); // CAMPOS (AKVR "camera position"), open the first time
+        if (ImGui::TreeNode("camera position  (third person)")) {
+            if (g_fp.load()) ImGui::TextDisabled("not used in first person");
+            float r = g_camRightCm.load(), u = g_camUpCm.load(), f = g_camFwdCm.load();
+            if (bvr::overlay::SliderStep("left / right (cm)", &r, -300.0f, 300.0f, "%.0f")) g_camRightCm.store(r);
+            if (bvr::overlay::SliderStep("down / up (cm)", &u, -300.0f, 300.0f, "%.0f")) g_camUpCm.store(u);
+            if (bvr::overlay::SliderStep("back / forward (cm)", &f, -300.0f, 300.0f, "%.0f")) g_camFwdCm.store(f);
+            if (ImGui::Button("Reset position")) { g_camRightCm.store(0.0f); g_camUpCm.store(0.0f); g_camFwdCm.store(0.0f); }
+            if (bvr::overlay::show_tests()) ImGui::TextDisabled("      moved frames %u", g_camFrames.load());
+            ImGui::TreePop();
+        }
         float uu = g_uuPerM.load();
         if (bvr::overlay::SliderStep("world scale  (higher = the world looks smaller)", &uu, 30.0f, 200.0f, "%.0f")) g_uuPerM.store(uu);
         float ipd = g_ipdMm.load();

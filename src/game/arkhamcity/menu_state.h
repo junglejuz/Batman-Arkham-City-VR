@@ -15,5 +15,6 @@ unsigned long long menu_open_at();           // GetTickCount64 of the last openi
 unsigned long long menu_closed_at();
 bool last_open_is_back_screen();             // TABRACE: the last menu opened = RGFxMovieBackScreen (map / upgrades)
 void clear_stale(const char* why);           // the adapter's safety: the game has run on for a while
+bool name_of(int idx, char* out, unsigned n); // an FName's text (false until the name table is found)
 
 } // namespace bvr::ac::menu_state

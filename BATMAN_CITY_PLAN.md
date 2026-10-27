@@ -2086,3 +2086,310 @@ before-panelwords). Memory panel-labels-plain-no-bad-switches.
 - HEADSET-confirmed in it: PANELMOUSE (JJ). Built but NOT run in the game before release (JJ asked to upload): SVRFALLBACK,
   SVRACTIVE (launcher lookup checked in isolation), ELEVATED log, TABRACE, VSYNCOFF, PANELWORDS. Test: Tab x3, mouse menu,
   tools/tests/Test-SVRFallback.bat.
+
+### RELEASE 0.1.5 2026-10-27 night (JJ: "That looks fantastic now ... remove some of those tests that we no longer require, then we
+### can update the mod and the release notes on GitHub")
+- TIDY: removed the dead ends of the night (camera view-record writes + finder, HUDLOOK / TICKLOOK, the GRAPPLELOOK comparison,
+  READWATCH, MARKERHEAD, the surface-reticle switch, the "steer all the time" test); scene.cpp LOOKSTEER block notes what was tried.
+  Built clean, installed (batman_city.dll 47FDA765; previous 0A846F2B = JJ's tested MARKERPIN build in backups/pre-TIDY-2026-10-27).
+  The tidy build itself was not run in the game before release (it only removes code that was off in normal play).
+- Contents since 0.1.4: head aim 1st + 3rd person (HEADAIM2 / AIM3P / AIMDEPTH / PADSEEN), grapple points where you look (LOOKSTEER +
+  MARKERSTEER + MARKERLAG + MARKERPIN), aim reticle at the HUD distance (RETICLESPHERE), CAMPOS, LEANBACK. HEADSET (JJ): head aim,
+  grapple look, markers pinned; CAMPOS / LEANBACK / RETICLESPHERE built, not explicitly confirmed. Shipped settings = JJ's live file
+  (first_person forced 0; look_targets_yaw=1 as JJ tested). README: new feature lines.
+
+## LEANBACK (2026-10-27)
+
+JJ 2026-10-27: "When in first person mode and I move my physical head back my virtual camera is moving through Batman's head."
+Looked up: batman_origins first_person.cpp clamp_eye + scene.cpp LEANBACK (same fix, same day).
+Cause: fp_apply puts the camera at his eye point (HEADCAM) plus fp_forward (25 cm) along the level push direction; eye_delta() then
+adds the headset's own position on top, so leaning back ~25 cm puts the lens inside his head.
+SOURCE (scene.cpp): fp_apply records, per view, his eye point before the push and the level direction it pushed along (the game
+camera's level forward, or the HEADAIM body's forward); fp_clamp_eye() runs on each eye's FINAL view (ctor_detour, eyeView =
+view x eye_delta; also AFW's other-eye view): along-push distance s = (origin - eye point) . dir; if s < min(fp_lean_min_cm,
+fp_forward_cm) the origin moves forward by the difference and the translation row is rebuilt. Sideways / up / down free; both eyes
+the same (stereo kept). Only on views fp_apply moved to his eyes (FPGATE: not menus, title, movies, third person). The same row
+change goes into delta so the room overlays stay in step. Setting fp_lean_min_cm (default 15, 0-40); panel FIRST PERSON slider
+"closest to his face when you lean back (cm)" under "camera up / down"; command "fp lean <cm>"; TESTS counter.
+Built (Release, no warnings; City has no ctest), installed 2026-10-27 (batman_city.dll 1D91EC69; previous DEAA2BD1 in
+backups/pre-LEANBACK-2026-10-27). HEADSET pending: first person, lean back - the lens should stop ~15 cm in front of his face.
+
+## MARKERPIN (JJ 2026-10-27 23:1x: "some targets have a big surface area ... So the reticle naturally slides along it ... But when
+## there's nowhere else for the reticle to go as you keep moving your head, then it starts jittering. I'd like to remove that jitter")
+
+Sliding along a grapple surface = the game's own pick (keep). Jitter at the surface's end = the marker's world point is fixed but the
+piece still moves: the HUD movie eases / lags the marker in the screen of the reference camera, which now turns with the head
+(MARKERSTEER), and on_hud_draw passed (piece - reference point) on as an offset.
+SOURCE (built, no warnings; installed batman_city.dll 0A846F2B, previous 6DA22F1D in backups/pre-MARKERPIN-2026-10-27): markers.cpp -
+each marker run's first reticle picture becomes the anchor (per pass slot / frame / point); every run piece uses the anchor as its
+reference point, so the anchor lands exactly on the world point and the rest keep their offsets from it. TESTS "markers pinned to
+their point on the object" (marker_pin, default on), counter "pinned pieces". MARKERLAG stays.
+Test: grapple point at the end of a ledge, keep turning / nodding the head past it - the marker stays still on the point; on a long
+ledge it still slides with the look. If the marker art sits off its point by design, it now centres on the point (check the RB prompt).
+
+## MARKERLAG (JJ 2026-10-27 23:0x after the MS1 run: "it seems to be working, but can we make it lock on to the object instead of
+## sliding along it as you keep moving your head up or around")
+
+MS1 RESULT: HEADSET (JJ) - grapple points appear where he looks (MARKERSTEER + LOOKSTEER work), no spin reported. Capture
+20261027_225529 targets.txt: the Canvas.Project point (5629, 21378, 1615) at NDC (-0.019, 0.021) of the steered camera = the head
+found it. Sliding cannot show in a still.
+Cause (SOURCE): the marker reference camera now turns with the head (MARKERSTEER); the movie draws a layout made in an earlier
+frame than the set looked up (lag 0 fixed), so each piece is offset by the reference camera's turn between those frames.
+SOURCE (built, no warnings; installed batman_city.dll 6DA22F1D, previous EC50BEEB in backups/pre-MARKERLAG-2026-10-27):
+markers.cpp on_hud_draw scores, for the reticle's own picture, the nearest reference in each of the last 4 frames (smoothed 0.9,
+switch at 20 % better) and uses that frame delay (and that frame's reference camera) for every piece; nothing at that delay = the
+nearest one that has it. TESTS: "markers find their frame delay automatically" (marker_lag_auto, default on), readout "frame delay
+in use N (scores ...)"; the manual slider 0-3 when off. Log "[bc] marker frame delay a -> b".
+Test: look at a grapple point and turn / nod the head quickly - the marker stays on the object; log delay line; TESTS scores
+(the delay in use has the lowest).
+
+## MARKERSTEER (JJ 2026-10-27 22:5x after the LA1 run: "I saw something happen briefly during the end of grapple look test. A grapple
+## hook point appeared where I was looking, but it was very small and facing the wrong direction ... when I first loaded into the
+## game, the camera started spinning of its own volition, and every time I tried to manually move the camera, it would then start
+## moving again on its own")
+
+### LA1 RESULTS (LIVE 22:43-22:50)
+- Spinning: TICKLOOK (actor facing written after each pair) FEEDS the camera - "FEEDS" 22:45:48, 22:48:42 (x8), 22:50:10; the
+  refusal was not honoured (mode no longer checked g_povRefused) -> kept writing = the spin. SOURCE bug, mine.
+- GRAPPLELOOK x2: "HUD world points per frame avg 1.00 max 1" in EVERY phase (one Canvas.Project point per frame - the count cannot
+  tell selections apart). JJ: the marker appeared near the END of the test = phase 5 "head steers Batman's camera" (12-15 s).
+- READWATCH 22:49:39 (5 s, 47 instructions): every exe reader of the controller / camera facing / view record / Batman pitch runs in
+  the TICK (in-draw readers: only 0x434041 / 0x4A106E on the facing, and ours); controller pitch readers 0xD9146E, 0x7120A1,
+  0x716BFC, 0x4F6B48, 0x433B32, 0xD915E4, 0x712186, 0x712671, 0xE4C194; camera facing 0xE39E52-0xE3AF38, 0xE4C6D8 (camera update).
+Conclusion: steering the controller DOES move City's grapple pick; it looked dead (LS1) because MARKERBASE places every marker from
+the drawn (stick) view - a point the head found 45-60 deg up is off that view's screen (piece never matched, drawn off-screen) or an
+upright card facing the stick camera seen nearly edge-on ("very small, facing the wrong direction").
+SOURCE (built, no warnings; installed batman_city.dll EC50BEEB, previous FA555308 in backups/pre-MARKERSTEER-2026-10-27):
+- TICKLOOK / HUDLOOK only in the GRAPPLELOOK test phases (TICKLOOK honours FEEDS).
+- look_targets = LOOKSTEER again (controller pitch steered by the head without the trigger, "also left / right" option back).
+- MARKERSTEER: while the head steers (aiming or looking), the marker reference view takes the GAME camera's rotation (steered = the
+  head's look, a frame behind) at the drawn position: Canvas.Project answers on-screen, cards face that look.
+### TEST PLAN MS1 (one launch, JJ drives)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | load in, stand still, then move the stick | no spin | camera only moves with the stick |
+| 2 | third person, look up at grapple points with the head | LOOKSTEER + MARKERSTEER | marker appears at normal size facing you |
+| 3 | tick "also left / right", look sideways | yaw option | side grapple points too; stick walks him where he looks |
+| 4 | LT aim, grapple marker + reticle | aiming unchanged | batclaw lands, reticle at HUD distance |
+Follow-ups: marker appears but jitters on head turns -> marker frame lag slider (markers "marker_lag") or smoothing; no marker ->
+READWATCH readers 0xD9146E / 0x7120A1 (static next).
+
+## LOOKALL + MARKERHEAD test + READWATCH (JJ 2026-10-27 22:4x after the HL1 run: grapple markers "still not responding to head
+## movements"; then: "Those grappling hook markers were originally rotating on their own axes when moving my head around, so they are
+## able to respond to head tracking ... presumably, we could still make them respond to location finding")
+
+### HL1 RESULTS (LIVE 22:31-22:32)
+- HUDLOOK wrote from 22:32:09 (3 "does not hold" refusals at 22:32:28 only); JJ: no change = the in-draw facing test (0xC57B81) is a
+  later filter, not what decides which grapple point gets a marker. RETICLESPHERE placed pieces at 360 UU (HUD distance x scale).
+Looked up again: STATIC - world tick 0x733310 fires UpdateCamera on each player camera at its END (0x733D92-0x733DCD, after the
+actors tick; GetPlayerViewPoint / UpdateCamera are script events, FNames at 0x1661CE0 / 0x1662528): the gun's targeting reads the
+camera left by the previous frame. 0xD93570 (called from the gun search 0xC85CE0) reads the view-record rotation but zeroes the pitch
+(movement / yaw only). Gun code reaches the camera through virtual / script calls - static callers stop there.
+JJ's point (markers responded to the head before MARKERBASE): the HUD script's Canvas.Project answers have come from the stick camera
+since MARKERBASE (round 9) - if the script picks the point nearest the screen centre from those answers, MARKERBASE is the blocker.
+SOURCE (built, no warnings; installed batman_city.dll FA555308, previous E059D3B1 in backups/pre-LOOKALL-2026-10-27):
+- TICKLOOK: look_targets now also writes the head look after each pair into the camera actor's facing (+0x48 record) AND the view
+  record pair, for the next tick (put back before the draw if not rebuilt; FEEDS guard with the engine's stick).
+- HUDLOOK now writes the actor facing + both view-record rotations (+0x54, +0x3B8, +0x3FC) per eye.
+- GRAPPLELOOK test (TESTS, 6 x 3 s): nothing / TICKLOOK / HUDLOOK / MARKERHEAD (Canvas.Project from the head-tracked eye view, as
+  before MARKERBASE) / controller steering / nothing; per phase "HUD world points per frame avg / max".
+- READWATCH (TESTS "Camera read recorder (5 s)", `bc readwatch`): hardware watch on the pitch of the camera facing, view record,
+  controller and Batman; each reading instruction with counts in the draw / in the tick.
+### TEST PLAN LA1 (one launch, JJ drives)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | third person, look up at grapple points with the head only | TICKLOOK + HUDLOOK (default) | markers appear; no "FEEDS" |
+| 2 | under a grapple point: TESTS "Grapple look test (18 s)", close the panel, look UP at it with the head only, hold still | which feed works | JJ: in which of the 6 phases (3 s each) markers showed; log per-phase world-point counts |
+| 3 | TESTS "Camera read recorder (5 s)", close the panel, move the camera up / down with the STICK near a grapple point | the reader | READWATCH lines: exe readers in the tick / draw |
+Follow-ups: 2 phase 4 (MARKERHEAD) -> head-tracked Canvas.Project for selection with a lag-matched placement; no phase -> the
+READWATCH reader names the code, next build overrides that read.
+
+## HUDLOOK + RETICLESPHERE (JJ 2026-10-27 22:3x after the LS1 run: "the reticle now wobbles all over the place as you look around.
+## ... make it conform to an invisible sphere surrounding Batman ... [grapple points] are still not appearing when you look up and
+## around"; then: the sphere "should be at the HUD distance, the same distance that the actual reticle is at ... I don't want the
+## reticle going to infinity")
+
+### LS1 RESULTS (LIVE 22:21-22:22)
+- "head look steering ... up / down" from 22:21:31 all launch (controller pitch steered), JJ: no grapple points = LOOKSTEER does
+  not reach the HUD's choice. RETICLESURF: HEADSET (JJ) wobbles - rejected.
+Looked up again (3 failed tries): STATIC re/BatmanAC.exe.unpacked.exe - the HUD world-marker gatherer 0xC572D0 (caller of the
+FSceneView project at 0xC57D0E, already noted in round 9): ebx = its controller argument ([ebp+0xC], +0x1B0 = Batman);
+0xC57B81 `[ebx+0x358]+0x54` -> Rotator.Vector 0x45E9D0 -> dot with the point's direction > threshold (in front of the camera
+ACTOR's facing), then a line-of-sight trace from `[ebx+0x358]+0x3AC` (camera position) via vtbl+0x130, then the projection through
+the drawn view. It runs while each eye's HUD is drawn - inside the draw - so writes made between frames (LOOKTARGETS) and the
+controller (LOOKSTEER) never reached it. (ARCwGrappleGunBase targeting 0xCA6230 / 0xC85CE0: Batman's own Rotation only once a
+swing has started.)
+SOURCE (built, no warnings; installed batman_city.dll E059D3B1, previous 016DA805 in backups/pre-HUDLOOK-2026-10-27):
+- HUDLOOK (scene.cpp): per eye, after CalcSceneView (calc_detour, g_loc / g_rot fresh) the camera actor's facing (controller +0x358
+  -> +0x54) = that eye's look (eyeView forward, from ctor_detour), only while the actor holds this pass's camera (5 UU, 3 deg);
+  put back right after each eye's draw (and before the pair) when it still holds our exact value. No game tick sees it; the camera
+  and Batman are untouched. look_targets drives it; LOOKSTEER is now a TESTS switch (not saved); the record writes are gone.
+  GRAPPLELOOK test phases: nothing / HUDLOOK / steering / nothing (4 x 3 s). TESTS counters "HUD look: writes, put back, did not
+  match". Log "HUDLOOK: the HUD now picks grapple points along your look".
+- RETICLESPHERE (markers.cpp): the aim reticle sits where the aim ray meets a sphere of the HUD panel's radius (HUD distance m x
+  world scale) around the ray's start (mid-eye while head aim steers, else the game camera), as a card facing back along the ray
+  (level, upright). The depth march still feeds AIMDEPTH's steering. Panel "aim reticle floats at the HUD's distance, facing you"
+  (aim_sphere, default on); RETICLESURF is a TESTS switch (not saved).
+### TEST PLAN HL1 (one launch, JJ drives)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | third person, no trigger: look up / around at grapple points with the head only | HUDLOOK | markers appear where he looks; log "HUDLOOK: the HUD now picks"; no "does not hold this pass's camera" spam |
+| 2 | press RB on a marker that only the head found | the gameplay pick | Batman grapples to it (or not: the gun's own pick differs) |
+| 3 | hold LT, look around | RETICLESPHERE | reticle steady at the HUD's distance on the aim line, no wobble; batclaw lands where aimed |
+| 4 | first person: 1 and 3 | first person | same |
+Follow-ups: 1 no markers + "does not hold" lines -> the actor lags the camera (relax / log values); markers but RB grapples
+elsewhere -> the gun's pick (0xC85CE0) uses another direction: same per-draw trick at its call site.
+
+## LOOKSTEER + RETICLESURF (JJ 2026-10-27 22:2x after the PS1 run: "Head aiming is working now, but the reticle ... looks like
+## it's shifting along a plane that is perpendicular to the direction Batman is facing. It would be good if the reticle changed its
+## orientation depending on the object that's behind it ... looking up is not making any grappling hook points appear")
+
+### PS1 RESULTS (LIVE 22:11-22:13)
+- PADSEEN works: "pad input seen: XboxTypeS_LeftTriggerAxis / LeftTrigger / RightX / RightY"; head aim active / released with
+  the trigger, third and first person. HEADSET (JJ): head aiming works.
+- Look targets wrote the record pair (+0x3AC / +0x3F0) from 22:12:22 all launch: JJ saw no grapple points on head looks = the
+  camera record does NOT drive City's grapple pick. GRAPPLELOOK test not run.
+- Reticle: the card faced the base (= body basis while steering) camera - "a plane perpendicular to Batman's facing".
+SOURCE (built, no warnings, cs_5_0 checked with fxc; installed batman_city.dll 016DA805, previous 3EBB41FC in
+backups/pre-LOOKSTEER-2026-10-27):
+- LOOKSTEER: "grapple points appear where you look" now steers the CONTROLLER with the head while the trigger is up (the camera
+  follows the controller, the grapple pick follows the camera): pitch only by default; "also left / right" (look_targets_yaw) steers
+  yaw too (the stick then walks him where he looks). Same body basis drawing as AIMSTATE; third person holds the camera's boom
+  offset sampled while the steered camera is within 5 deg of the body (looking up must not drop the view toward the ground). No
+  AIMDEPTH / head-ray reticle in this mode (aiming only). Camera-record writes now only in the GRAPPLELOOK test.
+- RETICLESURF (markers.cpp): the depth march also returns depth 4 px around its hit; the surface facing is rebuilt with that pass's
+  view-projection (edges skipped, smoothed 0.35), and the aim reticle card lies in that surface (right level / camera right on floors,
+  up = sky / away on floors; nearly edge-on surfaces turned up to 70 % toward the viewer). Panel "aim reticle lies on the surface it
+  points at" (aim_surface, default on); TESTS counters.
+### TEST PLAN LS1 (one launch, JJ drives)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | third person, no trigger: look up / around at grapple points with the head | LOOKSTEER | markers appear where he looks; view does not move or drop when looking up; log "head look steering" |
+| 2 | walk / run / glide while looking around | side effects | Batman walks where the stick says; no view swing |
+| 3 | hold LT, aim at a wall, the floor, a slanted roof, far and near | RETICLESURF + aim | reticle lies on each surface; batclaw lands on it |
+| 4 | panel: tick "also left / right", look sideways at grapple points | yaw option | side grapple points appear; the stick walks him where he looks |
+| 5 | first person: 1 and 3 again | first person | same |
+Follow-ups: 1 markers still only with the stick -> TESTS "Grapple look test" (phase 3 = steering) to measure; view drops when
+looking up -> sample threshold; reticle flips / jitters -> TESTS surface counters, smoothing.
+
+## PADSEEN + GRAPPLELOOK (JJ 2026-10-27 22:0x after the HA2 run: "Nothing has changed looking up does not make grappling hook
+## points appear and head aiming is still not working either in third person or first person")
+
+### HA2 RESULTS (LIVE 21:53-21:56, batman_city.log)
+- AIMCHECK confirmed 21:54:36; "aim depth: reticle piece placed" 21:54:46 in first person = JJ HELD the left trigger, yet no
+  "head aim active" line all launch = the trigger was never seen. Cause (SOURCE): left_trigger_held read the XInput bridge's composed
+  pad; City's pad comes through Steam Input (VR_ESSENTIALS §10 - the bridge never sees it), so it read 0 for ever.
+- Look targets: records found 21:54:38 at controller +0x358 -> +0x48, +0x3AC, +0x3F0, +0x574 (one camera object, vtable 014B39D0);
+  +0x3AC / +0x3F0 are 0x44 apart = Origins' pair (+0x3D8 / +0x41C); +0x48 = the camera's own Actor Location / Rotation. Writes ran
+  21:54:38-21:55:18 (JJ: no grapple points appeared), then "FEEDS ... switched off": the FEEDS check also read the stick from the
+  bridge (always "idle"), so stick turns toward the look counted - not proof that a record feeds the camera.
+SOURCE (built, no warnings, installed batman_city.dll 3EBB41FC; previous A52FC7E4 in backups/pre-PADSEEN-2026-10-27):
+- PADSEEN: InputKey / InputAxis detours (every lane) recognise "LeftTrigger" (button or axis > 0.12) and "RightX" / "RightY" by the
+  engine's name table (menu_state::name_of); log "[bc] pad input seen: <name>" for the first 40 pad names. left_trigger_held, the
+  FEEDS idle test and the stick check use them (composed pad as fallback).
+- Stick up / down while steering is kept, taken only while the stick is pushed (game pitch limits never drift the body), +-70 deg.
+- Look targets write only the 0x44 pair (else records past +0x100); log "look targets: writing ..." names written / watched.
+- GRAPPLELOOK (TESTS button "Grapple look test (15 s)", command `bc grapplelook`): 5 phases x 3 s - nothing / camera record pair /
+  every record / head steers the controller / nothing - each logs "GRAPPLELOOK phase N: HUD world points per frame avg / max" (a
+  grapple marker appearing raises the count) and the head's angle against the game camera. FEEDS never switches off during it.
+### TEST PLAN PS1 (one launch, JJ drives)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | load a save, walk / turn ~10 s, then hold LT and look around with the head (third person) | PADSEEN + AIMSTATE | log "pad input seen: ...LeftTrigger", "head aim active"; reticle follows the head; batclaw lands there |
+| 2 | same in first person | first person | same |
+| 3 | third person, stand under a grapple point, panel TESTS: "Grapple look test", close the panel, look UP at it with the head only, hold still 15 s | which feed makes grapple points appear | GRAPPLELOOK phase lines: the phase whose world points jump = the way to use; JJ says in which part markers showed |
+| 4 | no trigger: look up with the head at grapple points | look targets (pair only) | markers appear; no "FEEDS" |
+Follow-ups: 3 phase 3 only -> grapple look by steering pitch (camera follows; AIM3P drawing keeps the view still); no phase -> the
+grapple pick uses another source (hardware read watch on the records while a marker shows, Origins AIMWATCH).
+
+## HEADAIM2 + LOOKTARGETS (JJ 2026-10-27 night: "the head aiming is not working. We need to do the same thing with this game as
+## with Arkham Origins for first person and third person. Also ... the grappling hook reticles that show up when you move the camera
+## around with the right gamepad stick ... if I look up, I want the reticles to show up on the objects that I can attach to")
+
+Looked up: batman_origins BUILD_PLAN AIMSTATE / AIMDEPTH / AIM3P / POVAIM (+ AIMCTRL, AIMWATCH results) and first_person.cpp
+(0.1.5); memory arkham-first-person-asylum-origins (POVAIM 17:35 LIVE: writing the head's look into the camera's view record made
+"the reticle follow the head" without moving the camera, gadgets did not follow; AIMSTATE 18:05 HEADSET: batclaw goes where he
+looks; AIMDEPTH 19:24 HEADSET "a lot more accurate"); this file AIMDEPTH (markers.cpp centre-ray depth march); vrframework guide 12
+§5 (head aims vs only looks, expose as settings, back off for aiming); playbook @ b955f224 CAM-001 (head pose apart from body yaw);
+VR_ESSENTIALS §10 TRAVELSAFE (write a kept game pointer only after proving it alive this frame). Nothing else relevant.
+LIVE (City log 21:33): "Controller.Rotation at +0x54 confirmed" + "head aim active" - the same first try that did nothing in Origins.
+
+Cause (by Origins' evidence): City runs Origins' FIRST try (head look written into the controller every frame, body pitch level).
+Origins' working design differs: steer only while the left trigger is held, body pitch frozen at the press, aim through the
+looked-at point (the game fires from ITS camera over the shoulder), and in third person draw from where the camera would be for
+the stick (the game camera orbits with the controller). The grapple-point markers follow the game CAMERA, which only the stick moves.
+
+SOURCE (scene.cpp, markers.cpp):
+- AIMSTATE (both views): left trigger held -> controller = body x head, body = controller - our yaw, pitch frozen at the press;
+  both eyes from the body basis; release writes the body back. AIMCHECK kept.
+- AIMDEPTH: while steering, markers' depth march + the aim reticle run along the HEAD's centre ray (eye_delta 0 = mid-eye);
+  markers::aim_point -> the controller is turned so the game camera's ray passes through that point (within ~25 deg).
+- AIM3P: third person, same steering; the pair is drawn from the camera's offset laid along the body basis, and after the release
+  until the camera is back on the stick (<= 1.5 s, 0.5 deg).
+- LOOKTARGETS (new): without the trigger, after each pair's last eye the head's look (game camera x head) is written into the
+  camera's view record(s) (found live: controller + objects it points to, float3 = this frame's camera position + rotator =
+  its rotation, 20 moving checks in a row); before the next pair's first eye, a record still holding our write is put back
+  ("not rebuilt"); a record whose camera then jumps onto our look (stick idle, 5 pairs) is never written again ("FEEDS").
+  Writes only in gameplay (FPGATE: title, movies, menus, no Batman, camera far).
+- Panel FIRST PERSON: "aim with your head while holding the left trigger" (first person / third person, own boxes);
+  "grapple points appear where you look (no trigger needed)"; TESTS: "steer Batman's camera with your head ALL the time (test)",
+  counters. settings fp_look_aim, fp_look_aim_3p, look_targets (the ALL-the-time test is not saved). Commands
+  `bc aim3p|looktargets|aimalways on|off`, `bc aim status`.
+- AIMCHECK in third person: the camera can trail the controller through turns, so it refuses only a value that never matched.
+Built (Release, no warnings), installed 2026-10-27 night (batman_city.dll A52FC7E4; previous 1D91EC69 in
+backups/pre-HEADAIM2-2026-10-27). HEADSET pending.
+
+### TEST PLAN HA2 (one launch, JJ drives; third person first, then first person)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | load a save, stand still 1 s, walk / turn the camera with the stick ~10 s | AIMCHECK + record finder | log "Controller.Rotation at +0x54 confirmed", "view record found" |
+| 2 | third person, no trigger: look UP / left / right with the head only at grapple points | LOOKTARGETS | grapple markers appear where he looks; log no "FEEDS" |
+| 3 | walk forward while looking to the side (no trigger) | side effects | Batman still walks where the stick says (camera direction), view steady |
+| 4 | third person: hold LT, look at a grapple point, fire the batclaw; a batarang at a thug | AIM3P + AIMDEPTH | gadget lands on the reticle; view does not swing; release: no swing back |
+| 5 | first person on (both sticks twice): repeat 2 and 4 | first person | same |
+| 6 | pause / map / quit to title while holding / looking | gates | game camera normal in menus; log "head aim released (menu ...)" |
+Follow-ups: 2 no "view record found" -> log lists near matches (next build fixes the match); found but markers do not follow ->
+the game picks grapple points from the controller: TESTS "steer ... ALL the time" (prebuilt, same launch) shows if steering does it;
+4 lands off by a constant -> TESTS "aimed through the looked-at point" count 0 = no depth (markers aim depth off?).
+
+## HEADAIM (JJ 2026-10-27: "I want the head aiming in Arkham City also")
+
+Looked up: batman_asylum BUILD_PLAN HEADAIM + AIMLEVEL (Godoy301's PR #1), batman_origins BUILD_PLAN HEADAIM (same port, same day).
+SOURCE (scene.cpp, next to fp_update / fp_apply): Controller.Rotation ASSUMED at Actor +0x54 (City Location +0x48 + 0xC). AIMCHECK:
+no write until its yaw matches the game camera's heading within 4 deg for 30 frames in a row (log "[bc] head aim: Controller.Rotation
+at +0x54 confirmed" / "does NOT match ... stays off"). Per pair (first view, g_eyeSign <= 0 or AFW): body yaw = controller yaw minus
+our last contribution (stick turns kept), body pitch 0; target = body basis x head_rotation_view(g_pose) (the rotation eye_delta()
+renders with); written + read back; both eyes render from the body basis (eye_delta adds the head once). Released on FPGATE reasons,
+first person / aim off. Panel FIRST PERSON -> "aim with your head" (+ status text, TESTS counters); setting fp_look_aim (default 1).
+Built (Release, no warnings; City has no ctest), installed 2026-10-27 (batman_city.dll DEAA2BD1; previous in
+backups/pre-HEADAIM-2026-10-27). HEADSET pending.
+
+## CAMPOS - adjustable third-person camera position from Arkham Knight (JJ 2026-10-25: "put the adjustable camera from our Arkham knight mod panel into the other 3 arkham mods")
+
+Looked up: AKVR TPOFFSET (akvr/src/camera.cpp TPOFFSET, hooks.cpp VIEW "camera position"; akvr_native/NOTES.md "TPPITCH + TPOFFSET
+2026-10-18", released in AK 0.3.1); this game's FIRSTPERSON / FPGATE (the camera mover this rides on); memory
+arkham-first-person-asylum-origins, batman-city-first-person, origins-install-manifest. Playbook / framework: nothing new needed - a
+translation of the head-free game camera at the scene-view inputs, the engine rebuilds culling from it (same route as first person).
+AK's TPPITCH look-down limit was NOT ported (it is a separate AK-only control; JJ asked for the camera position).
+
+What it does (SOURCE): panel VIEW -> "camera position  (third person)" (open the first time): left / right, down / up, back / forward,
+-300..+300 cm each, "Reset position". The game camera's origin moves along its LEVEL right / LEVEL forward and world up (AK's frame,
+so it never swings with the head or tilts with the camera's pitch). Applied to the head-free game camera before the eye offsets, so
+both eyes, markers and AFW follow it. Only in third-person gameplay: off in first person and through first person's FPGATE checks
+(menus, title screen / movies, no Batman found, game camera more than 12 m from Batman = main menu stand-in, distant cutscenes). Costs
+nothing while all three are 0 (default). The game's own camera collision does not know about the shift: big values can put the
+camera into walls (same as AK).
+Saved: batman_city settings cam_right_cm / cam_up_cm / cam_forward_cm (scene.cpp settings_text / read). Command: `bc fp cam R U F` (cm). Status: "moved frames N" under TESTS.
+
+Built (Release, no warnings); installed batman_city.dll into JJ's game folder 2026-10-25 (previous DLL in
+backups/pre-CAMPOS-2026-10-25). Not released. HEADSET pending.
+
+### TEST PLAN CAMPOS (JJ drives, one launch, no restart needed)
+| # | what JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | gameplay, panel VIEW -> camera position: left / right to +60 | the shift happens, along the level right | Batman slides to the left of the view, horizon stays level |
+| 2 | turn with the stick and with the head | frame is the game camera's heading, not the head | offset stays to the side of Batman on stick turns; no swing on head turns |
+| 3 | down / up +50, back / forward -100 | the other two axes | camera higher / further back; looking down does not tilt the shift |
+| 4 | pause menu, map, first person on | the gates | game camera unchanged in menus and first person |
+| 5 | Reset position | defaults restore | the game's own framing |
+

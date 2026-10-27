@@ -25,11 +25,18 @@ behind when the camera swings.
   ![The same moment from the left and right eye, as the mod draws them for the headset](images/rooftop_stereo.jpg)
 
 - **HUD on a panel in front of you**; the grapple reticle sits on its target, at the target's depth.
+- **Aim with your head**: hold the left trigger and the batclaw, batarangs and other gadgets go where you look, in third
+  and first person. The aim reticle floats at the HUD's distance in the direction you aim.
+- **Grapple points where you look**: look up or around with your head and the game's grapple markers appear on what
+  you can reach, without turning the camera with the stick. Your view stays where the stick puts it. With "also left /
+  right" (on by default) the stick walks Batman where you look; untick it to keep looking left / right to yourself.
+- **Adjustable third-person camera position**: move the camera left / right, up / down, back / forward in the VR menu.
 - **Menus, the map and loading screens** on a large screen in the room, with the game's bat transitions.
 - **An in-headset VR menu**: hold both thumbsticks down (or press F10). World scale, HUD size and distance, render
   size, frame rate, comfort options, and more. Settings are saved.
 - **Higher-resolution loading screens and opening logos.**
-- **A first-person view** (optional, in the VR menu).
+- **A first-person view** (optional, in the VR menu, or click both sticks twice quickly). Leaning back never takes the
+  view into Batman's head.
 
 ## What you need
 
