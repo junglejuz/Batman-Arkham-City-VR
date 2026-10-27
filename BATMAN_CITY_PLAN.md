@@ -2087,6 +2087,28 @@ before-panelwords). Memory panel-labels-plain-no-bad-switches.
   SVRACTIVE (launcher lookup checked in isolation), ELEVATED log, TABRACE, VSYNCOFF, PANELWORDS. Test: Tab x3, mouse menu,
   tools/tests/Test-SVRFallback.bat.
 
+## ZOOMFOLLOW (2026-10-28, JJ after Origins: "that fixed it. Fix it in city as well")
+City DefaultInput.ini: XboxTypeS_RightThumbstick = "DebugMenuSelectA | ToggleCameraZoom" (as Origins). LOOKSTEER's third-person boom hold
+froze the game's zoom (Origins: Batman vanished, view stayed). scene.cpp: note_game_lens (ctor, the game's projection [0][0] before the
+headset lens) + the hold steps aside while the game camera is < 1.1 m from his eye point or its lens > 12 % narrower than its usual;
+log "[bc] ZOOMFOLLOW". Built clean, installed batman_city.dll 948142DB (previous 1123AB39 in backups/pre-ZOOMFOLLOW-2026-10-28).
+HEADSET pending: right-stick zoom in / out follows; looking up keeps the camera height.
+
+## DETVR2 (2026-10-28, JJ: "Yes, fix Arkham Cities Detective Scanner too" - after Origins' border-highlight stripes crawled per eye)
+vision.cpp kDetVrHlsl: the border-highlight stripe picture t6 was read at each eye's own screen x (ex = uv.x + c0[3].x scroll) = bands
+differing per eye and crawling; now at the shared overlay x (ex * vrRemap.x + vrRemap.z), as Origins' rebuild. HLSL checked with fxc;
+built clean; installed batman_city.dll 1123AB39 (previous 7A9BF76D = LABELFIX build in backups/pre-DETVR2-2026-10-28). HEADSET pending:
+detective mode border highlights - stripes fused, no crawl; vignette / honeycomb unchanged.
+
+## LABELFIX (2026-10-27 night, JJ: "Also check if Arkham City has this label issue" - enemy labels / detective vitals not pointing at
+## their target in Origins, fixed before in Asylum A2f)
+STATIC: City's HUD marker gatherer projects each target once at 0xC57D0E (return 0xC57D13): comiss 1.0 vs z, push esi, call 0xC1E580,
+x * 0.5, -y * 0.5 = the label code of Asylum 0x158A366 / Origins 0xCCDBD7 -> City has the same issue (not yet seen by JJ).
+SOURCE (built clean, installed batman_city.dll 7A9BF76D; previous 47FDA765 = 0.1.5 in backups/pre-LABELFIX-2026-10-27; not released):
+core get_hud_plane (room-fixed HUD quad corners); scene.cpp view_proj_detour label_fix on 0xC57D13 - the point where the line from the
+head centre to the target crosses the HUD panel (Asylum plane_target), z / w kept, game value when behind / off-screen / no plane.
+Detail and test: batman_origins BUILD_PLAN "LABELFIX + DETVR census" (TEST PLAN LF1 #4). HEADSET pending.
+
 ### RELEASE 0.1.5 2026-10-27 night (JJ: "That looks fantastic now ... remove some of those tests that we no longer require, then we
 ### can update the mod and the release notes on GitHub")
 - TIDY: removed the dead ends of the night (camera view-record writes + finder, HUDLOOK / TICKLOOK, the GRAPPLELOOK comparison,
@@ -2097,6 +2119,13 @@ before-panelwords). Memory panel-labels-plain-no-bad-switches.
   MARKERSTEER + MARKERLAG + MARKERPIN), aim reticle at the HUD distance (RETICLESPHERE), CAMPOS, LEANBACK. HEADSET (JJ): head aim,
   grapple look, markers pinned; CAMPOS / LEANBACK / RETICLESPHERE built, not explicitly confirmed. Shipped settings = JJ's live file
   (first_person forced 0; look_targets_yaw=1 as JJ tested). README: new feature lines.
+
+### RELEASE 0.1.6 2026-10-28 (JJ: "go ahead with packaging these up for GitHub, updating the release notes, providing me with a
+### shortened version of the release notes for each of the Discord channels")
+- Contents since 0.1.5: LABELFIX (enemy info / detective vitals on their targets), DETVR2 (outline stripes sampled at the shared
+  overlay position), ZOOMFOLLOW (right-stick camera zoom no longer hidden by the look-steering boom hold). All three built and
+  installed (batman_city.dll 948142DB = the packaged one); none of the three has had a City headset check yet (the same fixes were
+  confirmed in Origins). README: label + detective lines. Zip sha256 ec6f6972ee3d676d2476df6073630b41bb58f923a0f78486979179e119a15987.
 
 ## LEANBACK (2026-10-27)
 

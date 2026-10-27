@@ -261,6 +261,33 @@ bool hud_eyes_on() {
 }
 bool g_hudPlaced = false;
 XrPosef g_hudPose{{0, 0, 0, 1}, {0, 0, 0}};
+// LABELFIX (Batman Asylum A2f, ported 2026-10-27 night: enemy labels / detective vitals "not fixed to what they should be pointing to"):
+// the room-fixed HUD panel's corners in tracking space (top-left, top-right, bottom-left), published every composed frame; the game
+// side lays a label's end point where the head-centre-to-target line crosses this panel. Not published while the HUD rides the head
+// or shows a menu (then the labels keep the game's own placement).
+SRWLOCK g_hudPlaneLock = SRWLOCK_INIT;
+float g_hudPlane[3][3] = {};
+ULONGLONG g_hudPlaneMs = 0;
+void publish_hud_plane(const XrCompositionLayerQuad* q) {
+    AcquireSRWLockExclusive(&g_hudPlaneLock);
+    if (!q) { g_hudPlaneMs = 0; ReleaseSRWLockExclusive(&g_hudPlaneLock); return; }
+    const XrQuaternionf& o = q->pose.orientation;
+    auto rot = [&](float vx, float vy, float vz, float r[3]) { // v + 2 q x (q x v + w v)
+        const float tx = o.y * vz - o.z * vy + o.w * vx, ty = o.z * vx - o.x * vz + o.w * vy, tz = o.x * vy - o.y * vx + o.w * vz;
+        r[0] = vx + 2 * (o.y * tz - o.z * ty); r[1] = vy + 2 * (o.z * tx - o.x * tz); r[2] = vz + 2 * (o.x * ty - o.y * tx);
+    };
+    float right[3], up[3];
+    rot(0.5f * q->size.width, 0, 0, right);
+    rot(0, 0.5f * q->size.height, 0, up);
+    const float c[3] = {q->pose.position.x, q->pose.position.y, q->pose.position.z};
+    for (int j = 0; j < 3; ++j) {
+        g_hudPlane[0][j] = c[j] - right[j] + up[j]; // top-left
+        g_hudPlane[1][j] = c[j] + right[j] + up[j]; // top-right
+        g_hudPlane[2][j] = c[j] - right[j] - up[j]; // bottom-left
+    }
+    g_hudPlaneMs = GetTickCount64();
+    ReleaseSRWLockExclusive(&g_hudPlaneLock);
+}
 // The flat screen (movies, loading): placed in front of the head each time it appears.
 bool g_screenPlaced = false;
 XrPosef g_screenPose{{0, 0, 0, 1}, {0, 0, 0}};
@@ -4926,6 +4953,7 @@ void on_present_end(IDXGISwapChain* swapchain) {
                                       : g_hudWidthM.load(std::memory_order_relaxed);
                     hudQuad.size = {w, w * static_cast<float>(hd.Height) /
                                            static_cast<float>(hd.Width)};
+                    publish_hud_plane(hudHead || menuNow ? nullptr : &hudQuad); // LABELFIX
                     if (hud_eyes_on() && g_viewsValid) {
                         // Eye e's quad = intended position - (eye e - eye midpoint): seen from the head centre (as
                         // VD draws it) it then lies where eye e would see a quad at the intended distance.
@@ -5795,6 +5823,13 @@ void set_panel_texture(ID3D11Texture2D* tex) {
     if (!tex) g_panelPlaced = false; // re-place in front of the head on the next open
     g_panelTex = tex;
 }
+bool get_hud_plane(float corners[3][3]) { // LABELFIX
+    AcquireSRWLockShared(&g_hudPlaneLock);
+    const bool ok = g_hudPlaneMs && GetTickCount64() - g_hudPlaneMs < 200;
+    if (ok) memcpy(corners, g_hudPlane, sizeof g_hudPlane);
+    ReleaseSRWLockShared(&g_hudPlaneLock);
+    return ok;
+}
 void recenter_panel() { g_panelPlaced = false; g_hudPlaced = false; g_screenPlaced = false; }
 void set_repeat_lock(int fps) {
     const int v = (fps == 45 || fps == 40 || fps == 30) ? fps : 0;
@@ -6324,6 +6359,7 @@ bool recommended_eye_size(uint32_t* w, uint32_t* h) {
 void set_rendered_hfov(float) {}
 void set_asym_fov(bool) {}
 void set_panel_texture(ID3D11Texture2D*) {}
+bool get_hud_plane(float[3][3]) { return false; }
 void recenter_panel() {}
 void set_repeat_lock(int) {}
 void repeat_stats(uint32_t* a, uint32_t* b, uint32_t* c) { if (a) *a = 0; if (b) *b = 0; if (c) *c = 0; }

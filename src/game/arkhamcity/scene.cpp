@@ -813,6 +813,58 @@ void __fastcall canvas_w2p_detour(void* self, void* edx, void* stack, void* resu
 // ret 8, out = (x/w, y/w, z/w, w). Its Batman-side caller at 0xC57D0E projects object locations
 // into on-screen / off-screen lists (the marker gatherer, to be confirmed here). Every call is
 // recorded with its caller and the pass (eye) it ran in, plus each pass's own view matrix.
+// LABELFIX (Batman Asylum A2f / Batman Origins, JJ 2026-10-27 night: "Also check if Arkham City has this label issue"). STATIC:
+// City's HUD marker gatherer 0xC572D0 projects each target ONCE at 0xC57D0E (return 0xC57D13) and builds its label from that point
+// (depth <= 1, push the actor, x * 0.5, -y * 0.5 - the shape of Asylum 0x158A366 / Origins 0xCCDBD7). That point comes from this
+// eye's head-tracked view, but the HUD sheet is ONE room-fixed panel. Corrected before the label is built: the point becomes where the
+// line from the head centre to the target crosses the HUD panel, in the panel's picture coordinates - the same for both eyes; z / w
+// kept. Behind / off-screen / no panel (HUD on the head, menus) = the game's own value.
+std::atomic<bool> g_labelFix{true};
+std::atomic<uint32_t> g_labelFixed{0}, g_labelKept{0};
+M4 g_labelView{};          // this pass's drawn camera, before the eye (ctor_detour, game thread)
+float g_labelHead[3] = {}; // this pass's head centre, recentred XR metres
+bool g_labelPass = false;
+// LABELFIX: the point where the line from the head centre to the target crosses the panel (corners top-left, top-right,
+// bottom-left), in the panel's picture coordinates (-1..1, y up). Asylum markers9.cpp plane_target.
+bool label_on_panel(const float target[3],const float head[3],const float c[3][3],float xy[2]) {
+    float right[3],down[3],ray[3];
+    for(int j=0;j<3;j++) { right[j]=c[1][j]-c[0][j]; down[j]=c[2][j]-c[0][j]; ray[j]=target[j]-head[j]; }
+    const float n[3]={right[1]*down[2]-right[2]*down[1],right[2]*down[0]-right[0]*down[2],right[0]*down[1]-right[1]*down[0]};
+    float num=0,den=0,rr=0,dd=0;
+    for(int j=0;j<3;j++) { num+=(c[0][j]-head[j])*n[j]; den+=ray[j]*n[j]; rr+=right[j]*right[j]; dd+=down[j]*down[j]; }
+    if(fabsf(den)<1e-6f || rr<1e-6f || dd<1e-6f) return false;
+    const float t=num/den;
+    if(!std::isfinite(t) || t<=0) return false;
+    float u=0,v=0;
+    for(int j=0;j<3;j++) { const float o=head[j]+t*ray[j]-c[0][j]; u+=o*right[j]/rr; v+=o*down[j]/dd; }
+    xy[0]=2*u-1; xy[1]=1-2*v;
+    return std::isfinite(xy[0]) && std::isfinite(xy[1]);
+}
+void label_fix(const float* in, float* out) {
+    if (!g_labelFix.load(std::memory_order_relaxed) || !g_labelPass || !g_eyeSign) return;
+    float o[4];
+    memcpy(o, out, 16);
+    if (!(o[3] > 0.001f) || fabsf(o[0]) > 1.1f || fabsf(o[1]) > 1.1f) { g_labelKept.fetch_add(1, std::memory_order_relaxed); return; }
+    float c[3][3];
+    if (!bvr::vr::get_hud_plane(c)) { g_labelKept.fetch_add(1, std::memory_order_relaxed); return; }
+    for (auto& p : c) {
+        bvr::vr::HeadPose h{};
+        h.qw = 1; h.px = p[0]; h.py = p[1]; h.pz = p[2];
+        apply_recenter(h);
+        p[0] = h.px; p[1] = h.py; p[2] = h.pz;
+    }
+    const float uu = g_uuPerM.load(std::memory_order_relaxed);
+    float v[3];
+    for (int j = 0; j < 3; ++j) v[j] = in[0] * g_labelView.m[0][j] + in[1] * g_labelView.m[1][j] + in[2] * g_labelView.m[2][j] + g_labelView.m[3][j];
+    const float target[3] = {v[0] / uu, v[1] / uu, -v[2] / uu}; // game view space -> recentred XR (x right, y up, -z forward)
+    float xy[2];
+    if (!label_on_panel(target, g_labelHead, c, xy)) { g_labelKept.fetch_add(1, std::memory_order_relaxed); return; }
+    if (g_labelFixed.fetch_add(1, std::memory_order_relaxed) < 6)
+        BVR_LOG("[bc] LABELFIX: target %.0f/%.0f/%.0f eye %c game point %.3f/%.3f -> on the HUD panel %.3f/%.3f", in[0], in[1], in[2],
+                g_eyeSign < 0 ? 'L' : 'R', o[0], o[1], xy[0], xy[1]);
+    out[0] = xy[0];
+    out[1] = xy[1];
+}
 struct ViewProjCall { uint32_t ra; int eye; void* view; float in[3]; float out[4]; uint32_t frame; };
 constexpr uint32_t kVpCalls = 1024;
 ViewProjCall g_vpCalls[kVpCalls];
@@ -824,6 +876,8 @@ float* __fastcall view_proj_detour(void* view, void* edx, float* out, const floa
     // MARKEREYE: the HUD script's Canvas.Project (UCanvas::execProject's call returns here).
     if (_ReturnAddress() == reinterpret_cast<void*>(addr::kCanvasProjectRet))
         markers::on_project(g_eyeSign, g_draws.load(std::memory_order_relaxed), in, out);
+    else if (_ReturnAddress() == reinterpret_cast<void*>(0x00C57D13) && in && out)
+        label_fix(in, out); // LABELFIX
     ViewProjCall& e = g_vpCalls[g_vpN.fetch_add(1, std::memory_order_relaxed) % kVpCalls];
     e.ra = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(_ReturnAddress()));
     e.eye = g_eyeSign;
@@ -1536,6 +1590,19 @@ bool g_fpPairFull = false; // this pair steers for aiming (trigger): the reticle
 // basis while the head looks elsewhere - the view does not move when the head looks up.
 float g_tpOffset[3] = {};
 bool g_tpOffsetValid = false;
+// ZOOMFOLLOW (Batman Origins, JJ 2026-10-28 "that fixed it. Fix it in city as well"): the right-stick click is the game's
+// ToggleCameraZoom - its camera comes in close and hides Batman - but the boom hold kept the old distance whenever the head looked away
+// from the stick's direction. The hold steps aside while the game camera is < 1.1 m from his eye point or its lens is > 12 % narrower
+// than its usual (widest recent) one.
+float g_gameM00 = 0.0f, g_normalM00 = 0.0f; // the game's lens this pass / its usual one (ctor_detour)
+bool g_zoomFollow = false;
+unsigned g_zoomLogs = 0;
+void note_game_lens(float m00) {
+    if (!(m00 > 0.0f) || !std::isfinite(m00)) return;
+    g_gameM00 = m00;
+    if (!(g_normalM00 > 0.0f) || m00 < g_normalM00) g_normalM00 = m00;
+    else g_normalM00 += (m00 - g_normalM00) * 0.0005f; // a lasting FOV change becomes the new usual (~10 s)
+}
 bool g_lookOk = false; // this frame passed FPGATE with Batman found (fp_update)
 
 void fp_update() {
@@ -1715,7 +1782,18 @@ void fp_apply(M4& view) {
                 float loc[3];
                 for (int j = 0; j < 3; ++j)
                     loc[j] = (og[0] - g_fpEye[0]) * view.m[0][j] + (og[1] - g_fpEye[1]) * view.m[1][j] + (og[2] - g_fpEye[2]) * view.m[2][j];
-                if (g_fpPairAimed && !g_fpPairFull) { // LOOKSTEER: the boom as it is for the body's own direction
+                const float uuM = g_uuPerM.load(std::memory_order_relaxed);
+                const float dist = sqrtf(loc[0] * loc[0] + loc[1] * loc[1] + loc[2] * loc[2]) / (uuM > 1.0f ? uuM : 90.0f);
+                const bool zoomed = g_gameM00 > 0.0f && g_normalM00 > 0.0f && g_gameM00 > g_normalM00 * 1.12f;
+                const bool follow = dist < 1.1f || zoomed; // ZOOMFOLLOW
+                if (follow != g_zoomFollow) {
+                    g_zoomFollow = follow;
+                    if (g_zoomLogs++ < 30)
+                        BVR_LOG("[bc] ZOOMFOLLOW: game camera %s (%.2f m from his eyes, lens %.3f vs usual %.3f)",
+                                follow ? "zoomed / close - the view follows it" : "back to normal", dist, g_gameM00, g_normalM00);
+                }
+                if (follow) g_tpOffsetValid = false;
+                else if (g_fpPairAimed && !g_fpPairFull) { // LOOKSTEER: the boom as it is for the body's own direction
                     const float dotF = view.m[0][2] * g_tpBody[0][2] + view.m[1][2] * g_tpBody[1][2] + view.m[2][2] * g_tpBody[2][2];
                     if (dotF > 0.9962f || !g_tpOffsetValid) { memcpy(g_tpOffset, loc, sizeof loc); g_tpOffsetValid = true; } // 5 deg
                     else memcpy(loc, g_tpOffset, sizeof loc);
@@ -1807,10 +1885,17 @@ void* __fastcall ctor_detour(void* self, void* edx, BC_A27) {
     M4 view, proj;
     memcpy(&view, reinterpret_cast<void*>(a14), 64);
     memcpy(&proj, reinterpret_cast<void*>(a15), 64);
+    g_labelPass = false; // LABELFIX: set below for this pass's drawn camera
+    note_game_lens(proj.m[0][0]); // ZOOMFOLLOW: the game's own lens, before the headset's replaces it
     const M4 gameView = view; // MARKERSTEER: the game camera as the game built it (steered by the head while head aim / look runs)
     fp_apply(view); // FIRSTPERSON: the camera at Batman's eyes (everything below follows the moved camera)
     if ((g_eyeSign <= 0 || g_afwFrame) && proj.m[0][0] > 0.0f) // AFW: every frame's only pass
         vision::on_game_fov(2.0f * atanf(1.0f / proj.m[0][0]) * 180.0f / kPi); // the game's OWN fov (zoom)
+    g_labelView = view; // LABELFIX: this pass's drawn camera and head centre
+    g_labelHead[0] = g_posOn.load() ? g_pose.px : 0.0f;
+    g_labelHead[1] = g_posOn.load() ? g_pose.py : 0.0f;
+    g_labelHead[2] = g_posOn.load() ? g_pose.pz : 0.0f;
+    g_labelPass = g_eyeSign != 0;
     M4 delta = eye_delta(g_pose, g_eyeSign);
     M4 eyeView = mul(view, delta);
     if (g_eyeSign <= 0 || g_afwFrame) { // HEADAIM2: while head aim steers, the reticle and its depth follow the head's centre ray

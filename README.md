@@ -30,6 +30,10 @@ behind when the camera swings.
 - **Grapple points where you look**: look up or around with your head and the game's grapple markers appear on what
   you can reach, without turning the camera with the stick. Your view stays where the stick puts it. With "also left /
   right" (on by default) the stick walks Batman where you look; untick it to keep looking left / right to yourself.
+- **Enemy info and detective-mode details point at their targets**: the labels the game hangs on people (enemy
+  info, vital signs in detective mode) sit on the person they belong to, in both eyes.
+- **Detective mode drawn once for both eyes**: its vignette, honeycomb and the moving stripes in the outlines are
+  shared by both eyes, so they fuse into one picture instead of a frame around each eye.
 - **Adjustable third-person camera position**: move the camera left / right, up / down, back / forward in the VR menu.
 - **Menus, the map and loading screens** on a large screen in the room, with the game's bat transitions.
 - **An in-headset VR menu**: hold both thumbsticks down (or press F10). World scale, HUD size and distance, render

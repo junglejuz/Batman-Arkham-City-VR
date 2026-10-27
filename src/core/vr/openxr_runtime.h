@@ -320,6 +320,9 @@ void set_asym_fov(bool on);
 // head when it opens (AKVR pattern) and submits it on top of every other layer.
 void set_panel_texture(ID3D11Texture2D* tex); // render thread
 void recenter_panel(); // re-anchors the menu panel, the HUD quad and the flat screen
+// LABELFIX: the room-fixed HUD panel's corners in tracking space (top-left, top-right, bottom-left), if composed
+// within the last 200 ms and not riding the head or showing a menu.
+bool get_hud_plane(float corners[3][3]);
 // Batman City: full-view vignette (AKVR ZOOMVIG). amount 0..1 (the adapter fades it); look =
 // strength 0..1, clear centre half-angle and ramp width in degrees.
 // Batman City REPEAT: hold new frames to every Nth refresh (fps 45/40/30; 0 = off) and show the

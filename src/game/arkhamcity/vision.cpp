@@ -468,7 +468,9 @@ PSOut main(PSIn i) {
         qx = qy != 1.0 ? z : qx;
     }
     const float ex = (qx / qy) * c2[0].x + c2[0].w;
-    const float edge = t6.SampleBias(s6, float2(ex + c0[3].x, dc * 0.001 + c0[3].y), 0.0).y;
+    // DETVR2 (JJ 2026-10-28, Origins then City: border highlights show "vertical banding ... that slowly moves from right to left ...
+    // I don't think it's fusing"): the scrolling stripe picture t6 is read at the eye's own screen x (ex = uv.x); now at the shared x.
+    const float edge = t6.SampleBias(s6, float2(ex * vrRemap.x + vrRemap.z + c0[3].x, dc * 0.001 + c0[3].y), 0.0).y;
     const float4 m = min(r5, c0[14].wwww) - min(dc, c0[14].w);
     float e = dot(m, float4(0.25, 0.25, 0.25, 0.25)) * (c0[14].z / dc);
     e = saturate(edge * e);
