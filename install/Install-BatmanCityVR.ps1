@@ -44,8 +44,8 @@ function Find-SteamGameDir {
         }
     }
     foreach ($lib in ($libs | Select-Object -Unique)) {
-        $dir = Join-Path $lib ('steamapps\common\' + $Mod.SteamFolder)
-        if (Test-Path (Join-Path $dir $Mod.Exe)) { return $dir }
+        $dir = [IO.Path]::Combine($lib, 'steamapps\common\' + $Mod.SteamFolder)
+        if (Test-Path -LiteralPath ([IO.Path]::Combine($dir, $Mod.Exe))) { return $dir }
     }
     return $null
 }
